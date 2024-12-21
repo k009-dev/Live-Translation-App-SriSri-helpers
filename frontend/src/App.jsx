@@ -17,27 +17,47 @@ function App() {
       setVideoInfo(response.data);
       
       if (response.data.isExisting) {
-        toast.success('Video details retrieved from existing records!', {
-          duration: 4000,
-          icon: '📁'
-        });
+        if (response.data.audioStatus?.exists) {
+          toast.success('Video and audio already exist!', {
+            duration: 4000,
+            icon: '📁'
+          });
+        } else if (response.data.audioExtraction) {
+          toast.success('Video exists, started audio extraction!', {
+            duration: 4000,
+            icon: '🎵'
+          });
+        } else {
+          toast.error('Video exists but audio extraction failed', {
+            duration: 4000,
+            icon: '⚠️'
+          });
+        }
       } else {
-        toast.success('Video information retrieved and saved successfully!', {
+        toast.success('Video validated and audio extraction started!', {
           duration: 4000,
           icon: '✅'
         });
       }
     } catch (error) {
-      const errorMessage = error.response?.data?.error || 'Failed to validate URL';
-      const errorDetails = error.response?.data?.details;
+      console.error('Error:', error);
       
-      console.error('Error:', { message: errorMessage, details: errorDetails });
-      toast.error(errorMessage);
-      
-      if (error.response?.status === 403) {
-        toast.error('API Key error. Please check backend configuration.', {
+      if (error.code === 'ERR_NETWORK') {
+        toast.error('Cannot connect to server. Please make sure the backend is running.', {
           duration: 5000
         });
+      } else {
+        const errorMessage = error.response?.data?.error || 'Failed to validate URL';
+        const errorDetails = error.response?.data?.details;
+        
+        console.error('Error details:', { message: errorMessage, details: errorDetails });
+        toast.error(errorMessage);
+        
+        if (error.response?.status === 403) {
+          toast.error('API Key error. Please check backend configuration.', {
+            duration: 5000
+          });
+        }
       }
     } finally {
       setLoading(false);
