@@ -3,6 +3,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import { createWriteStream } from 'fs';
 import { spawn } from 'child_process';
+import { open } from 'fs/promises';  // For file lock checking
 
 const AUDIO_BASE_DIR = path.join(process.cwd(), 'temp_files', 'ExtractedAudio');
 
@@ -244,6 +245,36 @@ async function extractNormalAudio(videoUrl, outputDir) {
   });
 }
 
+// Check if file is locked (being written to)
+async function isFileLocked(filePath) {
+  try {
+    const fileHandle = await open(filePath, 'r+');
+    await fileHandle.close();
+    return false;  // File is not locked
+  } catch (error) {
+    if (error.code === 'EBUSY') {
+      return true;   // File is locked
+    }
+    throw error;     // Other error
+  }
+}
+
+// Move file from preprocessing to final extracted
+async function moveToFinalExtracted(videoId, fragmentName) {
+  const preprocessingPath = path.join(AUDIO_BASE_DIR, videoId, 'PreProcessing', fragmentName);
+  const finalPath = path.join(AUDIO_BASE_DIR, videoId, 'FinalExtracted', fragmentName);
+  
+  try {
+    await fs.copyFile(preprocessingPath, finalPath);
+    // Don't delete from preprocessing - keep as backup
+    console.log(`Moved ${fragmentName} to FinalExtracted`);
+    return true;
+  } catch (error) {
+    console.error(`Error moving ${fragmentName} to FinalExtracted:`, error);
+    return false;
+  }
+}
+
 // Extract audio chunks for live stream
 async function extractLiveAudioChunks(videoUrl, outputDir, liveStreamChoice) {
   return new Promise(async (resolve, reject) => {
@@ -253,8 +284,14 @@ async function extractLiveAudioChunks(videoUrl, outputDir, liveStreamChoice) {
     try {
       console.log('Starting live stream audio extraction...');
       
+      // Create directory structure
+      const preprocessingDir = path.join(outputDir, 'PreProcessing');
+      const finalExtractedDir = path.join(outputDir, 'FinalExtracted');
+      await fs.mkdir(preprocessingDir, { recursive: true });
+      await fs.mkdir(finalExtractedDir, { recursive: true });
+      
       // Use numbered fragments for output with WAV format
-      const outputTemplate = path.join(outputDir, 'fragment-%d.wav');
+      const preprocessingTemplate = path.join(preprocessingDir, 'fragment-%d.wav');
       
       // Base command arguments
       const ytdlpArgs = [
@@ -269,26 +306,23 @@ async function extractLiveAudioChunks(videoUrl, outputDir, liveStreamChoice) {
         '-o', '-'  // Output to stdout
       ];
 
-      // Add live-from-start flag only if starting from beginning
       if (liveStreamChoice === 'beginning') {
         ytdlpArgs.push('--live-from-start');
       }
 
-      // Add the URL as the last argument
       ytdlpArgs.push(videoUrl);
-      
       process = spawn('yt-dlp', ytdlpArgs);
 
       let ffmpegProcess = spawn('ffmpeg', [
         '-i', 'pipe:0',        // Read from stdin
         '-f', 'segment',       // Enable segmentation
-        '-segment_time', '20',  // Changed from 6 to 20 seconds per segment
+        '-segment_time', '20', // 20 seconds per segment
         '-reset_timestamps', '1',
         '-acodec', 'pcm_s16le', // LINEAR16 encoding
         '-ar', '16000',         // 16 kHz sample rate
         '-ac', '1',             // Mono channel
         '-map', '0:a',          // Only process audio
-        outputTemplate          // Output pattern
+        preprocessingTemplate   // Output to preprocessing directory
       ]);
 
       // Pipe yt-dlp output to ffmpeg
@@ -296,24 +330,49 @@ async function extractLiveAudioChunks(videoUrl, outputDir, liveStreamChoice) {
 
       let error = '';
       let lastProgressTime = Date.now();
+      let currentFragment = 0;
 
-      // Function to check for progress
-      const checkProgress = () => {
+      // Monitor ffmpeg output for segment completion
+      ffmpegProcess.stderr.on('data', async (data) => {
+        const output = data.toString();
+        console.log('FFmpeg output:', output);
+        lastProgressTime = Date.now();
+
+        // Check for segment completion message
+        if (output.includes('Opening')) {
+          // Previous fragment is complete, check and move it
+          const previousFragment = currentFragment - 1;
+          if (previousFragment >= 0) {
+            const fragmentName = `fragment-${previousFragment}.wav`;
+            const preprocessingPath = path.join(preprocessingDir, fragmentName);
+            
+            // Check if file exists and is not locked
+            try {
+              const locked = await isFileLocked(preprocessingPath);
+              if (!locked) {
+                await moveToFinalExtracted(path.basename(outputDir), fragmentName);
+              }
+            } catch (error) {
+              console.error('Error checking/moving fragment:', error);
+            }
+          }
+          currentFragment++;
+        }
+      });
+
+      // Set up progress check interval
+      const progressInterval = setInterval(async () => {
         const now = Date.now();
-        if (now - lastProgressTime > 60000 && !isShuttingDown) { // 1 minute without progress
+        if (now - lastProgressTime > 60000 && !isShuttingDown) {
           console.error('No progress for 1 minute, restarting stream...');
           try {
             process.kill();
             ffmpegProcess.kill();
-            // The process will be restarted by the error handler
           } catch (err) {
             console.error('Error killing stalled process:', err);
           }
         }
-      };
-
-      // Set up progress check interval
-      const progressInterval = setInterval(checkProgress, 10000);
+      }, 10000);
 
       process.stderr.on('data', (data) => {
         const errorStr = data.toString();
@@ -321,16 +380,11 @@ async function extractLiveAudioChunks(videoUrl, outputDir, liveStreamChoice) {
         console.error('Live stream error:', errorStr);
       });
 
-      ffmpegProcess.stderr.on('data', (data) => {
-        const output = data.toString();
-        console.log('FFmpeg output:', output);
-        lastProgressTime = Date.now(); // Update progress time
-      });
-
       // Resolve immediately for live streams as it's an ongoing process
       resolve({
         status: 'started',
-        outputDir,
+        outputDir: finalExtractedDir,  // Return the final directory path
+        preprocessingDir,              // Also return preprocessing directory
         message: 'Live audio extraction started in fragments',
         type: 'live',
         format: {
@@ -342,21 +396,17 @@ async function extractLiveAudioChunks(videoUrl, outputDir, liveStreamChoice) {
         stop: () => {
           isShuttingDown = true;
           clearInterval(progressInterval);
-          if (process) {
-            process.kill();
-          }
-          if (ffmpegProcess) {
-            ffmpegProcess.kill();
-          }
+          if (process) process.kill();
+          if (ffmpegProcess) ffmpegProcess.kill();
         }
       });
 
+      // Handle process completion and errors
       process.on('close', (code) => {
         clearInterval(progressInterval);
         if (code !== 0 && !isShuttingDown) {
           console.error('Live stream extraction ended with error:', error);
           console.log('Attempting to restart stream extraction...');
-          // Restart the stream extraction after a short delay
           setTimeout(() => {
             extractLiveAudioChunks(videoUrl, outputDir, liveStreamChoice)
               .catch(err => console.error('Failed to restart stream:', err));
@@ -368,7 +418,6 @@ async function extractLiveAudioChunks(videoUrl, outputDir, liveStreamChoice) {
         clearInterval(progressInterval);
         console.error('Live stream process error:', err);
         if (!isShuttingDown) {
-          // Attempt to restart on error
           setTimeout(() => {
             extractLiveAudioChunks(videoUrl, outputDir, liveStreamChoice)
               .catch(err => console.error('Failed to restart stream:', err));

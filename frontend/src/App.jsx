@@ -289,24 +289,25 @@ function App() {
                         <span className="font-medium">Status:</span> Active
                       </p>
                       <p className="text-sm">
-                        <span className="font-medium">Fragments Extracted:</span> {extractionStatus.chunkCount || 0}
+                        <span className="font-medium">Available Fragments:</span> {extractionStatus.chunkCount || 0}
+                        {extractionStatus.totalProcessing > extractionStatus.chunkCount && (
+                          <span className="text-gray-500 ml-2">
+                            ({extractionStatus.totalProcessing - extractionStatus.chunkCount} processing)
+                          </span>
+                        )}
                       </p>
-                      {extractionStatus.fragments && extractionStatus.fragments.length > 0 && (
+                      {extractionStatus.availableFiles && extractionStatus.availableFiles.length > 0 && (
                         <div className="text-sm">
-                          <p className="font-medium mb-1">Fragment List:</p>
+                          <p className="font-medium mb-1">Available Files:</p>
                           <div className="max-h-32 overflow-y-auto bg-white p-2 rounded border">
-                            {extractionStatus.fragments.map((fragment, index) => (
+                            {extractionStatus.availableFiles.map((file, index) => (
                               <p key={index} className="text-xs text-gray-600">
-                                {fragment}
+                                {file} {file === extractionStatus.latestChunk && 
+                                  <span className="text-blue-500 text-xs">(Latest)</span>}
                               </p>
                             ))}
                           </div>
                         </div>
-                      )}
-                      {extractionStatus.latestChunk && (
-                        <p className="text-sm text-gray-600">
-                          Latest Fragment: {extractionStatus.latestChunk}
-                        </p>
                       )}
                     </>
                   )}
@@ -336,11 +337,17 @@ function App() {
                           Error: {extractionStatus.error}
                         </p>
                       )}
-                      {extractionStatus.files?.length > 0 && (
-                        <p className="text-sm">
-                          <span className="font-medium">Files:</span>{' '}
-                          {extractionStatus.files.join(', ')}
-                        </p>
+                      {extractionStatus.availableFiles?.length > 0 && (
+                        <div className="text-sm">
+                          <p className="font-medium mb-1">Available Files:</p>
+                          <div className="max-h-32 overflow-y-auto bg-white p-2 rounded border">
+                            {extractionStatus.availableFiles.map((file, index) => (
+                              <p key={index} className="text-xs text-gray-600">
+                                {file}
+                              </p>
+                            ))}
+                          </div>
+                        </div>
                       )}
                     </>
                   )}

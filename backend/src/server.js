@@ -337,18 +337,34 @@ app.post('/api/extract-audio', async (req, res) => {
 app.get('/api/extraction-status/:savedLocation', async (req, res) => {
   try {
     const { savedLocation } = req.params;
-    const audioDir = path.join(process.cwd(), 'temp_files', 'ExtractedAudio', savedLocation);
-    console.log('Checking extraction status for:', { savedLocation, audioDir });
+    const baseAudioDir = path.join(process.cwd(), 'temp_files', 'ExtractedAudio', savedLocation);
+    const finalExtractedDir = path.join(baseAudioDir, 'FinalExtracted');
+    const preprocessingDir = path.join(baseAudioDir, 'PreProcessing');
+    
+    console.log('Checking extraction status for:', { 
+      savedLocation, 
+      finalExtractedDir,
+      preprocessingDir 
+    });
     
     try {
-      await fs.access(audioDir);
-      const files = await fs.readdir(audioDir);
-      console.log('Files in directory:', files);
+      // Check if directories exist
+      await fs.access(finalExtractedDir);
+      await fs.access(preprocessingDir);
       
-      // For normal videos, check status file and FullAudio.mp3
-      const statusPath = path.join(audioDir, 'status.json');
-      const hasStatusFile = files.includes('status.json');
-      const hasFullAudio = files.includes('FullAudio.mp3');
+      // Get files from both directories
+      const finalFiles = await fs.readdir(finalExtractedDir);
+      const preprocessingFiles = await fs.readdir(preprocessingDir);
+      
+      console.log('Files found:', {
+        finalExtracted: finalFiles,
+        preprocessing: preprocessingFiles
+      });
+      
+      // For normal videos, check status file and FullAudio.wav
+      const statusPath = path.join(preprocessingDir, 'status.json');
+      const hasStatusFile = preprocessingFiles.includes('status.json');
+      const hasFullAudio = finalFiles.includes('FullAudio.wav');
       
       console.log('Status check:', { 
         hasStatusFile, 
@@ -362,14 +378,15 @@ app.get('/api/extraction-status/:savedLocation', async (req, res) => {
           const status = JSON.parse(statusContent);
           console.log('Read status file:', status);
           
-          // If FullAudio.mp3 exists, ensure we show as completed
+          // If FullAudio.wav exists in final directory, ensure we show as completed
           if (hasFullAudio && status.status !== 'error') {
             const response = {
               ...status,
               status: 'completed',
               type: 'normal',
               progress: 100,
-              files: ['FullAudio.mp3']
+              files: ['FullAudio.wav'],
+              availableFiles: finalFiles.filter(f => f.endsWith('.wav'))
             };
             console.log('Sending completed status:', response);
             return res.json(response);
@@ -379,7 +396,8 @@ app.get('/api/extraction-status/:savedLocation', async (req, res) => {
           const response = {
             ...status,
             type: 'normal',
-            files: files.filter(f => f.endsWith('.mp3'))
+            files: finalFiles.filter(f => f.endsWith('.wav')),
+            availableFiles: finalFiles.filter(f => f.endsWith('.wav'))
           };
           console.log('Sending current status:', response);
           return res.json(response);
@@ -394,35 +412,40 @@ app.get('/api/extraction-status/:savedLocation', async (req, res) => {
           status: 'completed',
           type: 'normal',
           progress: 100,
-          files: ['FullAudio.mp3']
+          files: ['FullAudio.wav'],
+          availableFiles: finalFiles.filter(f => f.endsWith('.wav'))
         };
         console.log('Sending fallback completed status:', response);
         return res.json(response);
       }
       
-      // For live streams, return list of fragments
-      const fragments = files
-        .filter(f => f.startsWith('fragment-'))
+      // For live streams, return list of fragments from FinalExtracted
+      const fragments = finalFiles
+        .filter(f => f.startsWith('fragment-') && f.endsWith('.wav'))
         .sort((a, b) => {
           const numA = parseInt(a.match(/\d+/)[0]);
           const numB = parseInt(b.match(/\d+/)[0]);
           return numA - numB;
         });
       
-      // Add debug logging
+      // Get total fragments being processed
+      const processingFragments = preprocessingFiles
+        .filter(f => f.startsWith('fragment-') && f.endsWith('.wav'))
+        .length;
+      
       console.log('Found fragments:', {
-        directory: audioDir,
-        allFiles: files,
-        matchingFragments: fragments,
-        count: fragments.length
+        finalExtracted: fragments,
+        totalProcessing: processingFragments
       });
       
       const response = {
         status: 'in_progress',
         type: 'live',
         chunkCount: fragments.length,
+        totalProcessing: processingFragments,
         latestChunk: fragments[fragments.length - 1],
-        fragments: fragments
+        fragments: fragments,
+        availableFiles: fragments // These are the files ready for next step
       };
       console.log('Sending live status:', response);
       res.json(response);
@@ -430,7 +453,8 @@ app.get('/api/extraction-status/:savedLocation', async (req, res) => {
       if (err.code === 'ENOENT') {
         const response = {
           status: 'not_started',
-          message: 'Audio extraction has not been started'
+          message: 'Audio extraction has not been started',
+          availableFiles: []
         };
         console.log('Sending not started status:', response);
         res.json(response);
@@ -442,7 +466,8 @@ app.get('/api/extraction-status/:savedLocation', async (req, res) => {
     console.error('Error checking extraction status:', error);
     res.status(500).json({
       error: 'Failed to check extraction status',
-      details: error.message
+      details: error.message,
+      availableFiles: []
     });
   }
 });
