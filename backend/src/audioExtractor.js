@@ -81,11 +81,12 @@ async function getVideoInfo(url) {
 // Extract audio from normal video
 async function extractNormalAudio(videoUrl, outputDir) {
   return new Promise(async (resolve, reject) => {
-    const outputPath = path.join(outputDir, 'FullAudio.mp3');
+    const tempOutputPath = path.join(outputDir, 'temp_audio.wav');
+    const finalOutputPath = path.join(outputDir, 'FullAudio.wav');
     const statusPath = path.join(outputDir, 'status.json');
     
     try {
-      console.log('Starting audio extraction...', { outputPath, statusPath });
+      console.log('Starting audio extraction...', { tempOutputPath, finalOutputPath, statusPath });
       
       // Initialize status file
       const initialStatus = {
@@ -96,35 +97,35 @@ async function extractNormalAudio(videoUrl, outputDir) {
       await fs.writeFile(statusPath, JSON.stringify(initialStatus));
       console.log('Initialized status file:', initialStatus);
       
-      const process = spawn('yt-dlp', [
+      // First step: Extract audio using yt-dlp
+      const ytdlProcess = spawn('yt-dlp', [
         '--extract-audio',
-        '--audio-format', 'mp3',
-        '--audio-quality', '0',
-        '--output', outputPath,
+        '--audio-format', 'wav',
+        '--output', tempOutputPath,
         '--no-warnings',
         '--no-call-home',
         '--prefer-free-formats',
-        '--progress',  // Add progress flag to ensure we get progress updates
+        '--progress',
         videoUrl
       ]);
 
       let error = '';
 
-      process.stderr.on('data', (data) => {
+      ytdlProcess.stderr.on('data', (data) => {
         const errorStr = data.toString();
         error += errorStr;
         console.error('Extraction error:', errorStr);
       });
 
-      process.stdout.on('data', async (data) => {
+      ytdlProcess.stdout.on('data', async (data) => {
         const output = data.toString();
-        console.log('Raw output:', output);  // Debug raw output
+        console.log('Raw output:', output);
         
         if (output.includes('%')) {
           const match = output.match(/(\d+\.?\d*)%/);
           if (match) {
-            const progress = parseFloat(match[1]);
-            console.log(`Progress: ${progress}%`);
+            const progress = parseFloat(match[1]) * 0.5;
+            console.log(`Download Progress: ${progress}%`);
             
             // Update status file with progress
             const progressStatus = {
@@ -143,60 +144,97 @@ async function extractNormalAudio(videoUrl, outputDir) {
         }
       });
 
-      process.on('close', async (code) => {
+      ytdlProcess.on('close', async (code) => {
         if (code === 0) {
-          console.log('Audio extraction completed successfully');
-          // Update status file with completion
-          const completionStatus = {
-            status: 'completed',
-            progress: 100,
-            completionTime: new Date().toISOString()
-          };
+          console.log('Initial audio extraction completed, starting conversion...');
           
           try {
-            await fs.writeFile(statusPath, JSON.stringify(completionStatus));
-            console.log('Updated status file with completion:', completionStatus);
-          } catch (err) {
-            console.error('Error updating final status:', err);
+            // Update status for conversion phase
+            await fs.writeFile(statusPath, JSON.stringify({
+              status: 'converting',
+              progress: 50,
+              lastUpdate: new Date().toISOString()
+            }));
+
+            // Second step: Convert to specific format using ffmpeg
+            const ffmpegProcess = spawn('ffmpeg', [
+              '-i', tempOutputPath,
+              '-acodec', 'pcm_s16le',
+              '-ar', '16000',
+              '-ac', '1',
+              '-y',
+              finalOutputPath
+            ]);
+
+            let ffmpegError = '';
+
+            ffmpegProcess.stderr.on('data', (data) => {
+              const errorStr = data.toString();
+              console.log('FFmpeg progress:', errorStr);
+              // Update progress from 50% to 100% during conversion
+              const progressStatus = {
+                status: 'converting',
+                progress: 75,
+                lastUpdate: new Date().toISOString()
+              };
+              fs.writeFile(statusPath, JSON.stringify(progressStatus))
+                .catch(err => console.error('Error updating status during conversion:', err));
+            });
+
+            ffmpegProcess.on('close', async (ffmpegCode) => {
+              if (ffmpegCode === 0) {
+                console.log('Audio conversion completed successfully');
+                
+                // Clean up temporary file
+                try {
+                  await fs.unlink(tempOutputPath);
+                } catch (unlinkError) {
+                  console.error('Error removing temporary file:', unlinkError);
+                }
+
+                // Update status file with completion
+                const completionStatus = {
+                  status: 'completed',
+                  progress: 100,
+                  completionTime: new Date().toISOString()
+                };
+                
+                try {
+                  await fs.writeFile(statusPath, JSON.stringify(completionStatus));
+                  console.log('Updated status file with completion:', completionStatus);
+                } catch (err) {
+                  console.error('Error updating final status:', err);
+                }
+                
+                resolve({
+                  status: 'completed',
+                  outputPath: finalOutputPath,
+                  message: 'Audio extraction and conversion completed successfully'
+                });
+              } else {
+                throw new Error(`FFmpeg conversion failed with code ${ffmpegCode}`);
+              }
+            });
+          } catch (conversionError) {
+            throw new Error(`Conversion failed: ${conversionError.message}`);
           }
-          
-          resolve({
-            status: 'completed',
-            outputPath,
-            message: 'Audio extraction completed successfully'
-          });
         } else {
-          console.error('Error during extraction:', error);
-          // Update status file with error
-          const errorStatus = {
-            status: 'error',
-            error: error,
-            errorTime: new Date().toISOString()
-          };
-          
-          try {
-            await fs.writeFile(statusPath, JSON.stringify(errorStatus));
-            console.log('Updated status file with error:', errorStatus);
-          } catch (err) {
-            console.error('Error updating error status:', err);
-          }
-          
-          reject(new Error(`Extraction failed with code ${code}: ${error}`));
+          throw new Error(`Initial extraction failed with code ${code}: ${error}`);
         }
       });
 
     } catch (error) {
-      console.error('Error setting up audio extraction:', error);
-      // Update status file with setup error
-      const setupErrorStatus = {
+      console.error('Error in audio extraction:', error);
+      // Update status file with error
+      const errorStatus = {
         status: 'error',
         error: error.message,
         errorTime: new Date().toISOString()
       };
       
       try {
-        await fs.writeFile(statusPath, JSON.stringify(setupErrorStatus));
-        console.log('Updated status file with setup error:', setupErrorStatus);
+        await fs.writeFile(statusPath, JSON.stringify(errorStatus));
+        console.log('Updated status file with error:', errorStatus);
       } catch (err) {
         console.error('Error updating error status:', err);
       }
@@ -215,8 +253,8 @@ async function extractLiveAudioChunks(videoUrl, outputDir, liveStreamChoice) {
     try {
       console.log('Starting live stream audio extraction...');
       
-      // Use numbered fragments for output
-      const outputTemplate = path.join(outputDir, 'fragment-%d.mp3');
+      // Use numbered fragments for output with WAV format
+      const outputTemplate = path.join(outputDir, 'fragment-%d.wav');
       
       // Base command arguments
       const ytdlpArgs = [
@@ -244,12 +282,13 @@ async function extractLiveAudioChunks(videoUrl, outputDir, liveStreamChoice) {
       let ffmpegProcess = spawn('ffmpeg', [
         '-i', 'pipe:0',        // Read from stdin
         '-f', 'segment',       // Enable segmentation
-        '-segment_time', '6',  // 6 seconds per segment
+        '-segment_time', '20',  // Changed from 6 to 20 seconds per segment
         '-reset_timestamps', '1',
-        '-c:a', 'libmp3lame', // MP3 codec
-        '-q:a', '0',          // Highest quality
-        '-map', '0:a',        // Only process audio
-        outputTemplate        // Output pattern
+        '-acodec', 'pcm_s16le', // LINEAR16 encoding
+        '-ar', '16000',         // 16 kHz sample rate
+        '-ac', '1',             // Mono channel
+        '-map', '0:a',          // Only process audio
+        outputTemplate          // Output pattern
       ]);
 
       // Pipe yt-dlp output to ffmpeg
@@ -294,6 +333,12 @@ async function extractLiveAudioChunks(videoUrl, outputDir, liveStreamChoice) {
         outputDir,
         message: 'Live audio extraction started in fragments',
         type: 'live',
+        format: {
+          codec: 'LINEAR16',
+          sampleRate: '16kHz',
+          bitDepth: '16-bit',
+          channels: 'mono'
+        },
         stop: () => {
           isShuttingDown = true;
           clearInterval(progressInterval);
