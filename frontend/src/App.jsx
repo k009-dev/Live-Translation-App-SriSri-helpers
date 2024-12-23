@@ -2,10 +2,71 @@ import { useState } from 'react';
 import axios from 'axios';
 import { Toaster, toast } from 'react-hot-toast';
 
+// LiveStreamModal Component
+function LiveStreamModal({ isOpen, onClose, onConfirm }) {
+  if (!isOpen) return null;
+
+  return (
+    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+      <div className="bg-white p-6 rounded-lg shadow-xl max-w-md w-full">
+        <h2 className="text-xl font-bold mb-4">Live Stream Detected</h2>
+        <p className="mb-6">Please select where to start the audio extraction:</p>
+        <div className="space-y-4">
+          <button
+            onClick={() => onConfirm('beginning')}
+            className="w-full py-2 px-4 bg-blue-500 text-white rounded hover:bg-blue-600 transition"
+          >
+            Start from beginning of stream
+          </button>
+          <button
+            onClick={() => onConfirm('current')}
+            className="w-full py-2 px-4 bg-green-500 text-white rounded hover:bg-green-600 transition"
+          >
+            Start from current point
+          </button>
+          <button
+            onClick={onClose}
+            className="w-full py-2 px-4 bg-gray-300 text-gray-700 rounded hover:bg-gray-400 transition"
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function App() {
   const [url, setUrl] = useState('');
   const [videoInfo, setVideoInfo] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [showLiveModal, setShowLiveModal] = useState(false);
+  const [pendingLiveUrl, setPendingLiveUrl] = useState(null);
+
+  const handleLiveStreamChoice = async (choice) => {
+    setShowLiveModal(false);
+    if (!pendingLiveUrl) return;
+
+    setLoading(true);
+    try {
+      const response = await axios.post('http://localhost:3001/api/validate-youtube', { 
+        url: pendingLiveUrl,
+        liveStreamChoice: choice 
+      });
+      setVideoInfo(response.data);
+      
+      toast.success('Live stream processing started!', {
+        duration: 4000,
+        icon: '🎥'
+      });
+    } catch (error) {
+      console.error('Error:', error);
+      toast.error(error.response?.data?.error || 'Failed to process live stream');
+    } finally {
+      setLoading(false);
+      setPendingLiveUrl(null);
+    }
+  };
 
   const validateUrl = async (e) => {
     e.preventDefault();
@@ -13,6 +74,20 @@ function App() {
     setVideoInfo(null);
     
     try {
+      // First, check if it's a live stream
+      const checkResponse = await axios.post('http://localhost:3001/api/validate-youtube', { 
+        url,
+        checkOnly: true 
+      });
+
+      if (checkResponse.data.isLiveContent) {
+        setPendingLiveUrl(url);
+        setShowLiveModal(true);
+        setLoading(false);
+        return;
+      }
+
+      // If not live, proceed normally
       const response = await axios.post('http://localhost:3001/api/validate-youtube', { url });
       setVideoInfo(response.data);
       
@@ -88,6 +163,16 @@ function App() {
   return (
     <div className="min-h-screen bg-gray-100 py-8 px-4">
       <Toaster position="top-right" />
+      <LiveStreamModal 
+        isOpen={showLiveModal}
+        onClose={() => {
+          setShowLiveModal(false);
+          setPendingLiveUrl(null);
+          setLoading(false);
+        }}
+        onConfirm={handleLiveStreamChoice}
+      />
+      
       <div className="max-w-4xl mx-auto">
         <h1 className="text-3xl font-bold text-center mb-8 text-black">YouTube Video Validator</h1>
         

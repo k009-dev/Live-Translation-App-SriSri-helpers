@@ -137,7 +137,7 @@ async function extractNormalAudio(videoUrl, outputDir) {
 }
 
 // Extract audio chunks for live stream
-async function extractLiveAudioChunks(videoUrl, outputDir) {
+async function extractLiveAudioChunks(videoUrl, outputDir, liveStreamChoice) {
   return new Promise(async (resolve, reject) => {
     let process;
     let isShuttingDown = false;
@@ -148,19 +148,28 @@ async function extractLiveAudioChunks(videoUrl, outputDir) {
       // Use numbered fragments for output
       const outputTemplate = path.join(outputDir, 'fragment-%d.mp3');
       
-      process = spawn('yt-dlp', [
+      // Base command arguments
+      const ytdlpArgs = [
         '--format', 'bestaudio',
         '--no-warnings',
         '--no-call-home',
         '--prefer-free-formats',
-        '--live-from-start',
         '--no-playlist',
         '--fragment-retries', '3',
         '--retries', '3',
         '--force-overwrites',
-        '-o', '-',  // Output to stdout
-        videoUrl
-      ]);
+        '-o', '-'  // Output to stdout
+      ];
+
+      // Add live-from-start flag only if starting from beginning
+      if (liveStreamChoice === 'beginning') {
+        ytdlpArgs.push('--live-from-start');
+      }
+
+      // Add the URL as the last argument
+      ytdlpArgs.push(videoUrl);
+      
+      process = spawn('yt-dlp', ytdlpArgs);
 
       let ffmpegProcess = spawn('ffmpeg', [
         '-i', 'pipe:0',        // Read from stdin
@@ -234,7 +243,7 @@ async function extractLiveAudioChunks(videoUrl, outputDir) {
           console.log('Attempting to restart stream extraction...');
           // Restart the stream extraction after a short delay
           setTimeout(() => {
-            extractLiveAudioChunks(videoUrl, outputDir)
+            extractLiveAudioChunks(videoUrl, outputDir, liveStreamChoice)
               .catch(err => console.error('Failed to restart stream:', err));
           }, 5000);
         }
@@ -246,7 +255,7 @@ async function extractLiveAudioChunks(videoUrl, outputDir) {
         if (!isShuttingDown) {
           // Attempt to restart on error
           setTimeout(() => {
-            extractLiveAudioChunks(videoUrl, outputDir)
+            extractLiveAudioChunks(videoUrl, outputDir, liveStreamChoice)
               .catch(err => console.error('Failed to restart stream:', err));
           }, 5000);
         }
@@ -265,32 +274,33 @@ async function extractLiveAudioChunks(videoUrl, outputDir) {
   });
 }
 
-// Main function to handle audio extraction
-async function extractAudio(videoUrl, videoId, isLive) {
+// Extract audio from video
+async function extractAudio(videoUrl, videoId, isLive, liveStreamChoice) {
   try {
-    // Create base directory if it doesn't exist
-    await ensureDirectoryExists(AUDIO_BASE_DIR);
-
-    // Create directory for this video
+    // Create output directory
     const outputDir = path.join(AUDIO_BASE_DIR, videoId);
     await ensureDirectoryExists(outputDir);
 
-    // Get video information first
+    // Get video info first
     const info = await getVideoInfo(videoUrl);
     console.log('Video info retrieved:', {
       title: info.title,
       duration: info.duration,
-      is_live: info.is_live,
-      format_id: info.format_id
+      isLive: info._type === 'live' || info.is_live
     });
 
-    if (isLive || info.is_live) {
-      return await extractLiveAudioChunks(videoUrl, outputDir);
-    } else {
-      return await extractNormalAudio(videoUrl, outputDir);
+    // If it's a live stream
+    if (isLive) {
+      if (!liveStreamChoice) {
+        throw new Error('Live stream choice is required for live content');
+      }
+      return extractLiveAudioChunks(videoUrl, outputDir, liveStreamChoice);
     }
+
+    // For normal videos
+    return extractNormalAudio(videoUrl, outputDir);
   } catch (error) {
-    console.error('Error in audio extraction:', error);
+    console.error('Error in extractAudio:', error);
     throw error;
   }
 }

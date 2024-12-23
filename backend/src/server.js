@@ -111,7 +111,7 @@ const extractVideoId = (url) => {
 // Validate YouTube URL and get video information
 app.post('/api/validate-youtube', async (req, res) => {
   try {
-    const { url } = req.body;
+    const { url, checkOnly, liveStreamChoice } = req.body;
     if (!url) {
       return res.status(400).json({ error: 'URL is required' });
     }
@@ -126,10 +126,15 @@ app.post('/api/validate-youtube', async (req, res) => {
     const audioStatus = await checkAudioExists(videoId);
 
     if (existingVideo) {
+      // If checkOnly flag is set, just return the video info
+      if (checkOnly) {
+        return res.json(existingVideo.details);
+      }
+
       // If video exists but no audio, start audio extraction
       if (!audioStatus.exists) {
         try {
-          const extractionResult = await extractAudio(url, videoId, existingVideo.details.isLiveContent);
+          const extractionResult = await extractAudio(url, videoId, existingVideo.details.isLiveContent, liveStreamChoice);
           return res.json({
             ...existingVideo.details,
             isExisting: true,
@@ -186,6 +191,11 @@ app.post('/api/validate-youtube', async (req, res) => {
         rawApiResponse: response.data
       };
 
+      // If checkOnly flag is set, just return the video info
+      if (checkOnly) {
+        return res.json(videoInfo);
+      }
+
       // Save video details
       const { dirName } = await saveVideoDetails(videoId, videoInfo);
       videoInfo.savedLocation = dirName;
@@ -193,7 +203,7 @@ app.post('/api/validate-youtube', async (req, res) => {
 
       // Start audio extraction
       try {
-        const extractionResult = await extractAudio(url, videoId, videoInfo.isLiveContent);
+        const extractionResult = await extractAudio(url, videoId, videoInfo.isLiveContent, liveStreamChoice);
         videoInfo.audioExtraction = extractionResult;
         videoInfo.message = 'Video details saved and audio extraction started';
       } catch (extractionError) {
