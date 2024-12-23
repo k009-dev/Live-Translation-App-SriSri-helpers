@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import axios from 'axios';
 import { Toaster, toast } from 'react-hot-toast';
 
@@ -42,6 +42,40 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [showLiveModal, setShowLiveModal] = useState(false);
   const [pendingLiveUrl, setPendingLiveUrl] = useState(null);
+  const [extractionStatus, setExtractionStatus] = useState(null);
+
+  // Add polling function for extraction status
+  useEffect(() => {
+    let pollInterval;
+
+    if (videoInfo?.savedLocation) {
+      // Start polling immediately
+      checkExtractionStatus(videoInfo.savedLocation);
+      
+      // Set up polling interval (every 2 seconds)
+      pollInterval = setInterval(() => {
+        checkExtractionStatus(videoInfo.savedLocation);
+      }, 2000);
+    }
+
+    // Cleanup polling on unmount or when video changes
+    return () => {
+      if (pollInterval) {
+        clearInterval(pollInterval);
+      }
+    };
+  }, [videoInfo?.savedLocation]);
+
+  // Function to check extraction status
+  const checkExtractionStatus = async (savedLocation) => {
+    try {
+      const response = await axios.get(`http://localhost:3001/api/extraction-status/${savedLocation}`);
+      console.log('Extraction status response:', response.data); // Debug logging
+      setExtractionStatus(response.data);
+    } catch (error) {
+      console.error('Error checking extraction status:', error);
+    }
+  };
 
   const handleLiveStreamChoice = async (choice) => {
     setShowLiveModal(false);
@@ -72,6 +106,7 @@ function App() {
     e.preventDefault();
     setLoading(true);
     setVideoInfo(null);
+    setExtractionStatus(null);
     
     try {
       // First, check if it's a live stream
@@ -242,6 +277,76 @@ function App() {
                 )}
               </div>
             </div>
+            
+            {/* Add extraction status display */}
+            {extractionStatus && (
+              <div className="mt-4 p-4 bg-gray-50 rounded-lg">
+                <h3 className="font-medium mb-2">Extraction Status:</h3>
+                <div className="space-y-2">
+                  {extractionStatus.type === 'live' && (
+                    <>
+                      <p className="text-sm">
+                        <span className="font-medium">Status:</span> Active
+                      </p>
+                      <p className="text-sm">
+                        <span className="font-medium">Fragments Extracted:</span> {extractionStatus.chunkCount || 0}
+                      </p>
+                      {extractionStatus.fragments && extractionStatus.fragments.length > 0 && (
+                        <div className="text-sm">
+                          <p className="font-medium mb-1">Fragment List:</p>
+                          <div className="max-h-32 overflow-y-auto bg-white p-2 rounded border">
+                            {extractionStatus.fragments.map((fragment, index) => (
+                              <p key={index} className="text-xs text-gray-600">
+                                {fragment}
+                              </p>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                      {extractionStatus.latestChunk && (
+                        <p className="text-sm text-gray-600">
+                          Latest Fragment: {extractionStatus.latestChunk}
+                        </p>
+                      )}
+                    </>
+                  )}
+                  {extractionStatus.type === 'normal' && (
+                    <>
+                      <p className="text-sm">
+                        <span className="font-medium">Status:</span>{' '}
+                        {extractionStatus.status === 'completed' ? 'Completed' :
+                         extractionStatus.status === 'error' ? 'Error' :
+                         extractionStatus.status === 'downloading' ? 'Downloading' : 'Processing'}
+                      </p>
+                      {extractionStatus.progress !== undefined && (
+                        <div className="space-y-1">
+                          <p className="text-sm">
+                            <span className="font-medium">Progress:</span> {Math.round(extractionStatus.progress)}%
+                          </p>
+                          <div className="w-full bg-gray-200 rounded-full h-2.5">
+                            <div 
+                              className="bg-blue-600 h-2.5 rounded-full transition-all duration-300" 
+                              style={{ width: `${extractionStatus.progress}%` }}
+                            ></div>
+                          </div>
+                        </div>
+                      )}
+                      {extractionStatus.error && (
+                        <p className="text-sm text-red-600">
+                          Error: {extractionStatus.error}
+                        </p>
+                      )}
+                      {extractionStatus.files?.length > 0 && (
+                        <p className="text-sm">
+                          <span className="font-medium">Files:</span>{' '}
+                          {extractionStatus.files.join(', ')}
+                        </p>
+                      )}
+                    </>
+                  )}
+                </div>
+              </div>
+            )}
           </div>
         )}
       </div>

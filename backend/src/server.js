@@ -338,41 +338,102 @@ app.get('/api/extraction-status/:savedLocation', async (req, res) => {
   try {
     const { savedLocation } = req.params;
     const audioDir = path.join(process.cwd(), 'temp_files', 'ExtractedAudio', savedLocation);
+    console.log('Checking extraction status for:', { savedLocation, audioDir });
     
     try {
       await fs.access(audioDir);
       const files = await fs.readdir(audioDir);
+      console.log('Files in directory:', files);
       
-      // For normal videos, check if FullAudio.mp3 exists
-      if (files.includes('FullAudio.mp3')) {
-        return res.json({
-          status: 'completed',
-          type: 'normal',
-          files: ['FullAudio.mp3']
-        });
+      // For normal videos, check status file and FullAudio.mp3
+      const statusPath = path.join(audioDir, 'status.json');
+      const hasStatusFile = files.includes('status.json');
+      const hasFullAudio = files.includes('FullAudio.mp3');
+      
+      console.log('Status check:', { 
+        hasStatusFile, 
+        hasFullAudio, 
+        statusPath 
+      });
+
+      if (hasStatusFile) {
+        try {
+          const statusContent = await fs.readFile(statusPath, 'utf-8');
+          const status = JSON.parse(statusContent);
+          console.log('Read status file:', status);
+          
+          // If FullAudio.mp3 exists, ensure we show as completed
+          if (hasFullAudio && status.status !== 'error') {
+            const response = {
+              ...status,
+              status: 'completed',
+              type: 'normal',
+              progress: 100,
+              files: ['FullAudio.mp3']
+            };
+            console.log('Sending completed status:', response);
+            return res.json(response);
+          }
+          
+          // Return current status for normal video download
+          const response = {
+            ...status,
+            type: 'normal',
+            files: files.filter(f => f.endsWith('.mp3'))
+          };
+          console.log('Sending current status:', response);
+          return res.json(response);
+        } catch (err) {
+          console.error('Error reading status file:', err);
+        }
       }
       
-      // For live streams, return list of chunks
-      const chunks = files
-        .filter(f => f.startsWith('chunk_'))
+      // Fallback for normal videos without status file
+      if (hasFullAudio) {
+        const response = {
+          status: 'completed',
+          type: 'normal',
+          progress: 100,
+          files: ['FullAudio.mp3']
+        };
+        console.log('Sending fallback completed status:', response);
+        return res.json(response);
+      }
+      
+      // For live streams, return list of fragments
+      const fragments = files
+        .filter(f => f.startsWith('fragment-'))
         .sort((a, b) => {
           const numA = parseInt(a.match(/\d+/)[0]);
           const numB = parseInt(b.match(/\d+/)[0]);
           return numA - numB;
         });
       
-      res.json({
+      // Add debug logging
+      console.log('Found fragments:', {
+        directory: audioDir,
+        allFiles: files,
+        matchingFragments: fragments,
+        count: fragments.length
+      });
+      
+      const response = {
         status: 'in_progress',
         type: 'live',
-        chunkCount: chunks.length,
-        latestChunk: chunks[chunks.length - 1]
-      });
+        chunkCount: fragments.length,
+        latestChunk: fragments[fragments.length - 1],
+        fragments: fragments
+      };
+      console.log('Sending live status:', response);
+      res.json(response);
     } catch (err) {
       if (err.code === 'ENOENT') {
-        res.json({
+        const response = {
           status: 'not_started',
           message: 'Audio extraction has not been started'
-        });
+        };
+        console.log('Sending not started status:', response);
+        res.json(response);
       } else {
         throw err;
       }

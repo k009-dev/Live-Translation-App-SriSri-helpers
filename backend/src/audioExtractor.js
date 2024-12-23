@@ -82,9 +82,19 @@ async function getVideoInfo(url) {
 async function extractNormalAudio(videoUrl, outputDir) {
   return new Promise(async (resolve, reject) => {
     const outputPath = path.join(outputDir, 'FullAudio.mp3');
+    const statusPath = path.join(outputDir, 'status.json');
     
     try {
-      console.log('Starting audio extraction...');
+      console.log('Starting audio extraction...', { outputPath, statusPath });
+      
+      // Initialize status file
+      const initialStatus = {
+        status: 'starting',
+        progress: 0,
+        startTime: new Date().toISOString()
+      };
+      await fs.writeFile(statusPath, JSON.stringify(initialStatus));
+      console.log('Initialized status file:', initialStatus);
       
       const process = spawn('yt-dlp', [
         '--extract-audio',
@@ -94,6 +104,7 @@ async function extractNormalAudio(videoUrl, outputDir) {
         '--no-warnings',
         '--no-call-home',
         '--prefer-free-formats',
+        '--progress',  // Add progress flag to ensure we get progress updates
         videoUrl
       ]);
 
@@ -105,19 +116,50 @@ async function extractNormalAudio(videoUrl, outputDir) {
         console.error('Extraction error:', errorStr);
       });
 
-      process.stdout.on('data', (data) => {
+      process.stdout.on('data', async (data) => {
         const output = data.toString();
+        console.log('Raw output:', output);  // Debug raw output
+        
         if (output.includes('%')) {
           const match = output.match(/(\d+\.?\d*)%/);
           if (match) {
-            console.log(`Progress: ${match[1]}%`);
+            const progress = parseFloat(match[1]);
+            console.log(`Progress: ${progress}%`);
+            
+            // Update status file with progress
+            const progressStatus = {
+              status: 'downloading',
+              progress: progress,
+              lastUpdate: new Date().toISOString()
+            };
+            
+            try {
+              await fs.writeFile(statusPath, JSON.stringify(progressStatus));
+              console.log('Updated status file:', progressStatus);
+            } catch (err) {
+              console.error('Error updating status file:', err);
+            }
           }
         }
       });
 
-      process.on('close', (code) => {
+      process.on('close', async (code) => {
         if (code === 0) {
           console.log('Audio extraction completed successfully');
+          // Update status file with completion
+          const completionStatus = {
+            status: 'completed',
+            progress: 100,
+            completionTime: new Date().toISOString()
+          };
+          
+          try {
+            await fs.writeFile(statusPath, JSON.stringify(completionStatus));
+            console.log('Updated status file with completion:', completionStatus);
+          } catch (err) {
+            console.error('Error updating final status:', err);
+          }
+          
           resolve({
             status: 'completed',
             outputPath,
@@ -125,12 +167,40 @@ async function extractNormalAudio(videoUrl, outputDir) {
           });
         } else {
           console.error('Error during extraction:', error);
+          // Update status file with error
+          const errorStatus = {
+            status: 'error',
+            error: error,
+            errorTime: new Date().toISOString()
+          };
+          
+          try {
+            await fs.writeFile(statusPath, JSON.stringify(errorStatus));
+            console.log('Updated status file with error:', errorStatus);
+          } catch (err) {
+            console.error('Error updating error status:', err);
+          }
+          
           reject(new Error(`Extraction failed with code ${code}: ${error}`));
         }
       });
 
     } catch (error) {
       console.error('Error setting up audio extraction:', error);
+      // Update status file with setup error
+      const setupErrorStatus = {
+        status: 'error',
+        error: error.message,
+        errorTime: new Date().toISOString()
+      };
+      
+      try {
+        await fs.writeFile(statusPath, JSON.stringify(setupErrorStatus));
+        console.log('Updated status file with setup error:', setupErrorStatus);
+      } catch (err) {
+        console.error('Error updating error status:', err);
+      }
+      
       reject(error);
     }
   });
