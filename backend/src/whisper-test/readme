@@ -1,0 +1,9 @@
+# First time setup
+python3 -m venv whisper-env
+source whisper-env/bin/activate
+pip install -U openai-whisper
+
+# Every time you start working
+source whisper-env/bin/activate  # Activate Python env
+cd backend && npm start          # Start backend
+cd frontend && npm start         # Start frontend (new terminal)
