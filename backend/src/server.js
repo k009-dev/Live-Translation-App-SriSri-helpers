@@ -5,6 +5,7 @@ import { google } from 'googleapis';
 import fs from 'fs/promises';
 import path from 'path';
 import { extractAudio } from './audioExtractor.js';
+import { setupTranscriptionWatcher, getTranscriptionStatus } from './transcriptionHandler.js';
 
 dotenv.config();
 
@@ -91,6 +92,17 @@ const extractVideoId = (url) => {
   }
   return null;
 };
+
+// Store active transcription watchers
+const activeWatchers = new Map();
+
+// Function to start transcription watcher for a video
+async function startTranscriptionWatcher(videoId) {
+  if (!activeWatchers.has(videoId)) {
+    const watcher = await setupTranscriptionWatcher(videoId);
+    activeWatchers.set(videoId, watcher);
+  }
+}
 
 // Validate YouTube URL and get video information
 app.post('/api/validate-youtube', async (req, res) => {
@@ -198,6 +210,13 @@ app.post('/api/validate-youtube', async (req, res) => {
         console.error('Audio extraction error:', extractionError);
         videoInfo.audioError = extractionError.message;
         videoInfo.message = 'Video details saved but audio extraction failed';
+      }
+
+      // Start transcription watcher after validation
+      if (!checkOnly) {
+        startTranscriptionWatcher(videoId).catch(error => {
+          console.error('Error starting transcription watcher:', error);
+        });
       }
 
       res.json(videoInfo);
@@ -346,6 +365,21 @@ app.get('/api/extraction-status/:savedLocation', async (req, res) => {
     console.error('Error checking extraction status:', error);
     res.status(500).json({ 
       error: 'Failed to check extraction status',
+      details: error.message
+    });
+  }
+});
+
+// Add endpoint to check transcription status
+app.get('/api/transcription-status/:videoId', async (req, res) => {
+  try {
+    const { videoId } = req.params;
+    const status = await getTranscriptionStatus(videoId);
+    res.json(status);
+  } catch (error) {
+    console.error('Error getting transcription status:', error);
+    res.status(500).json({ 
+      error: 'Failed to get transcription status',
       details: error.message
     });
   }
