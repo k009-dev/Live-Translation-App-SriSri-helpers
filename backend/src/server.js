@@ -16,8 +16,7 @@ app.use(cors());
 app.use(express.json());
 
 // Constants
-const VIDEO_DETAILS_DIR = path.join(process.cwd(), 'temp_files', 'VideoDetailsYT');
-const AUDIO_BASE_DIR = path.join(process.cwd(), 'temp_files', 'ExtractedAudio');
+const BASE_TEMP_DIR = path.join(process.cwd(), 'temp_files');
 
 // Ensure directory exists
 async function ensureDirectoryExists(dirPath) {
@@ -31,18 +30,18 @@ async function ensureDirectoryExists(dirPath) {
 // Check if video already exists and get its latest details
 async function getExistingVideoDetails(videoId) {
   try {
-    const files = await fs.readdir(VIDEO_DETAILS_DIR);
-    const videoFolder = files.find(file => file === videoId);
+    const videoDir = path.join(BASE_TEMP_DIR, videoId);
+    const detailsPath = path.join(videoDir, 'ytVideoDetails.json');
     
-    if (!videoFolder) return null;
-
-    const detailsPath = path.join(VIDEO_DETAILS_DIR, videoFolder, 'details.json');
-    const detailsContent = await fs.readFile(detailsPath, 'utf-8');
-    return {
-      details: JSON.parse(detailsContent),
-      folderName: videoFolder,
-      isExisting: true
-    };
+    try {
+      const detailsContent = await fs.readFile(detailsPath, 'utf-8');
+      return {
+        details: JSON.parse(detailsContent),
+        isExisting: true
+      };
+    } catch {
+      return null;
+    }
   } catch (error) {
     console.error('Error checking existing video:', error);
     return null;
@@ -52,34 +51,19 @@ async function getExistingVideoDetails(videoId) {
 // Check if audio exists for a video
 async function checkAudioExists(videoId) {
   try {
-    const audioDir = path.join(AUDIO_BASE_DIR, videoId);
+    const audioDir = path.join(BASE_TEMP_DIR, videoId, 'ExtractedAudio');
     await fs.access(audioDir);
     
-    const files = await fs.readdir(audioDir);
+    const finalDir = path.join(audioDir, 'FinalExtracted');
+    const files = await fs.readdir(finalDir);
     return {
       exists: true,
-      hasFullAudio: files.includes('FullAudio.mp3'),
-      hasChunks: files.some(f => f.startsWith('chunk_')),
-      files
+      hasChunks: files.some(f => f.endsWith('.wav')),
+      files: files.filter(f => f.endsWith('.wav'))
     };
   } catch {
     return { exists: false };
   }
-}
-
-// Save video details to JSON file
-async function saveVideoDetails(videoId, details) {
-  await ensureDirectoryExists(VIDEO_DETAILS_DIR);
-  
-  const dirName = videoId;
-  const dirPath = path.join(VIDEO_DETAILS_DIR, dirName);
-  
-  await ensureDirectoryExists(dirPath);
-  
-  const filePath = path.join(dirPath, 'details.json');
-  await fs.writeFile(filePath, JSON.stringify(details, null, 2));
-  
-  return { dirName, filePath };
 }
 
 // Validate YouTube API key
@@ -139,7 +123,7 @@ app.post('/api/validate-youtube', async (req, res) => {
             ...existingVideo.details,
             isExisting: true,
             message: 'Video details exist, started audio extraction',
-            savedLocation: existingVideo.folderName,
+            savedLocation: videoId,
             audioExtraction: extractionResult
           });
         } catch (extractionError) {
@@ -148,7 +132,7 @@ app.post('/api/validate-youtube', async (req, res) => {
             ...existingVideo.details,
             isExisting: true,
             message: 'Video details exist, but audio extraction failed',
-            savedLocation: existingVideo.folderName,
+            savedLocation: videoId,
             audioError: extractionError.message
           });
         }
@@ -159,7 +143,7 @@ app.post('/api/validate-youtube', async (req, res) => {
         ...existingVideo.details,
         isExisting: true,
         message: 'Video details and audio already exist',
-        savedLocation: existingVideo.folderName,
+        savedLocation: videoId,
         audioStatus
       });
     }
@@ -196,9 +180,13 @@ app.post('/api/validate-youtube', async (req, res) => {
         return res.json(videoInfo);
       }
 
-      // Save video details
-      const { dirName } = await saveVideoDetails(videoId, videoInfo);
-      videoInfo.savedLocation = dirName;
+      // Create directory and save video details
+      const videoDir = path.join(BASE_TEMP_DIR, videoId);
+      await ensureDirectoryExists(videoDir);
+      const detailsPath = path.join(videoDir, 'ytVideoDetails.json');
+      await fs.writeFile(detailsPath, JSON.stringify(videoInfo, null, 2));
+
+      videoInfo.savedLocation = videoId;
       videoInfo.isExisting = false;
 
       // Start audio extraction
@@ -232,64 +220,7 @@ app.post('/api/validate-youtube', async (req, res) => {
   }
 });
 
-// Get list of saved video details
-app.get('/api/saved-videos', async (req, res) => {
-  try {
-    await ensureDirectoryExists(VIDEO_DETAILS_DIR);
-    const files = await fs.readdir(VIDEO_DETAILS_DIR);
-    
-    // Get details for each saved video
-    const videosDetails = await Promise.all(
-      files.map(async (folder) => {
-        try {
-          const detailsPath = path.join(VIDEO_DETAILS_DIR, folder, 'details.json');
-          const content = await fs.readFile(detailsPath, 'utf-8');
-          const details = JSON.parse(content);
-          return {
-            folder,
-            id: details.id,
-            title: details.title,
-            savedAt: details.savedAt
-          };
-        } catch {
-          return null;
-        }
-      })
-    );
-
-    res.json({ 
-      savedVideos: videosDetails.filter(Boolean)
-        .sort((a, b) => new Date(b.savedAt) - new Date(a.savedAt))
-    });
-  } catch (error) {
-    console.error('Error getting saved videos:', error);
-    res.status(500).json({ error: 'Failed to get saved videos' });
-  }
-});
-
-// Get specific video details
-app.get('/api/video/:videoId', async (req, res) => {
-  try {
-    const { videoId } = req.params;
-    const existingVideo = await getExistingVideoDetails(videoId);
-    
-    if (!existingVideo) {
-      return res.status(404).json({ error: 'Video details not found' });
-    }
-
-    res.json(existingVideo.details);
-  } catch (error) {
-    console.error('Error getting video details:', error);
-    res.status(500).json({ error: 'Failed to get video details' });
-  }
-});
-
-// Health check endpoint
-app.get('/health', (req, res) => {
-  res.json({ status: 'ok' });
-});
-
-// Add new endpoint for audio extraction
+// Add endpoint for audio extraction
 app.post('/api/extract-audio', async (req, res) => {
   try {
     const { url, savedLocation } = req.body;
@@ -300,14 +231,15 @@ app.post('/api/extract-audio', async (req, res) => {
       });
     }
 
-    // Get video details to check if it's live
-    const detailsPath = path.join(VIDEO_DETAILS_DIR, savedLocation, 'details.json');
-    const detailsContent = await fs.readFile(detailsPath, 'utf-8');
-    const videoDetails = JSON.parse(detailsContent);
+    // Get video details from the new location
+    const videoDir = path.join(BASE_TEMP_DIR, savedLocation);
+    const detailsPath = path.join(videoDir, 'ytVideoDetails.json');
     
-    const isLive = videoDetails.isLiveContent;
-
     try {
+      const detailsContent = await fs.readFile(detailsPath, 'utf-8');
+      const videoDetails = JSON.parse(detailsContent);
+      const isLive = videoDetails.isLiveContent;
+
       const extractionResult = await extractAudio(url, savedLocation, isLive);
       res.json({
         ...extractionResult,
@@ -337,9 +269,10 @@ app.post('/api/extract-audio', async (req, res) => {
 app.get('/api/extraction-status/:savedLocation', async (req, res) => {
   try {
     const { savedLocation } = req.params;
-    const baseAudioDir = path.join(process.cwd(), 'temp_files', 'ExtractedAudio', savedLocation);
-    const finalExtractedDir = path.join(baseAudioDir, 'FinalExtracted');
-    const preprocessingDir = path.join(baseAudioDir, 'PreProcessing');
+    const baseDir = path.join(BASE_TEMP_DIR, savedLocation);
+    const extractedAudioDir = path.join(baseDir, 'ExtractedAudio');
+    const finalExtractedDir = path.join(extractedAudioDir, 'FinalExtracted');
+    const preprocessingDir = path.join(extractedAudioDir, 'PreProcessing');
     
     console.log('Checking extraction status for:', { 
       savedLocation, 
@@ -361,113 +294,59 @@ app.get('/api/extraction-status/:savedLocation', async (req, res) => {
         preprocessing: preprocessingFiles
       });
       
-      // For normal videos, check status file and FullAudio.wav
+      // Check status file
       const statusPath = path.join(preprocessingDir, 'status.json');
       const hasStatusFile = preprocessingFiles.includes('status.json');
-      const hasFullAudio = finalFiles.includes('FullAudio.wav');
       
-      console.log('Status check:', { 
-        hasStatusFile, 
-        hasFullAudio, 
-        statusPath 
-      });
-
       if (hasStatusFile) {
         try {
           const statusContent = await fs.readFile(statusPath, 'utf-8');
           const status = JSON.parse(statusContent);
-          console.log('Read status file:', status);
           
-          // If FullAudio.wav exists in final directory, ensure we show as completed
-          if (hasFullAudio && status.status !== 'error') {
-            const response = {
-              ...status,
-              status: 'completed',
-              type: 'normal',
-              progress: 100,
-              files: ['FullAudio.wav'],
-              availableFiles: finalFiles.filter(f => f.endsWith('.wav'))
-            };
-            console.log('Sending completed status:', response);
-            return res.json(response);
-          }
-          
-          // Return current status for normal video download
-          const response = {
-            ...status,
-            type: 'normal',
-            files: finalFiles.filter(f => f.endsWith('.wav')),
-            availableFiles: finalFiles.filter(f => f.endsWith('.wav'))
-          };
-          console.log('Sending current status:', response);
-          return res.json(response);
+          // Add available files to status response
+          status.availableFiles = finalFiles.filter(f => f.endsWith('.wav'));
+          console.log('Sending status from file:', status);
+          return res.json(status);
         } catch (err) {
           console.error('Error reading status file:', err);
         }
       }
       
-      // Fallback for normal videos without status file
-      if (hasFullAudio) {
-        const response = {
-          status: 'completed',
-          type: 'normal',
-          progress: 100,
-          files: ['FullAudio.wav'],
-          availableFiles: finalFiles.filter(f => f.endsWith('.wav'))
-        };
-        console.log('Sending fallback completed status:', response);
-        return res.json(response);
-      }
-      
-      // For live streams, return list of fragments from FinalExtracted
-      const fragments = finalFiles
-        .filter(f => f.startsWith('fragment-') && f.endsWith('.wav'))
+      // Return list of available files
+      const wavFiles = finalFiles.filter(f => f.endsWith('.wav'))
         .sort((a, b) => {
-          const numA = parseInt(a.match(/\d+/)[0]);
-          const numB = parseInt(b.match(/\d+/)[0]);
+          const numA = parseInt(a.match(/fragment-(\d+)\.wav/)[1]);
+          const numB = parseInt(b.match(/fragment-(\d+)\.wav/)[1]);
           return numA - numB;
         });
       
-      // Get total fragments being processed
-      const processingFragments = preprocessingFiles
-        .filter(f => f.startsWith('fragment-') && f.endsWith('.wav'))
-        .length;
-      
-      console.log('Found fragments:', {
-        finalExtracted: fragments,
-        totalProcessing: processingFragments
-      });
-      
       const response = {
-        status: 'in_progress',
-        type: 'live',
-        chunkCount: fragments.length,
-        totalProcessing: processingFragments,
-        latestChunk: fragments[fragments.length - 1],
-        fragments: fragments,
-        availableFiles: fragments // These are the files ready for next step
+        status: wavFiles.length > 0 ? 'in_progress' : 'starting',
+        type: 'normal',
+        chunkCount: wavFiles.length,
+        totalProcessing: preprocessingFiles.filter(f => f.endsWith('.wav')).length,
+        latestChunk: wavFiles[wavFiles.length - 1],
+        availableFiles: wavFiles
       };
-      console.log('Sending live status:', response);
-      res.json(response);
+      
+      console.log('Sending generated status:', response);
+      return res.json(response);
+      
     } catch (err) {
-      if (err.code === 'ENOENT') {
-        const response = {
-          status: 'not_started',
-          message: 'Audio extraction has not been started',
-          availableFiles: []
-        };
-        console.log('Sending not started status:', response);
-        res.json(response);
-      } else {
-        throw err;
-      }
+      console.log('Directories not found, sending not_started status');
+      return res.json({
+        status: 'not_started',
+        type: 'normal',
+        chunkCount: 0,
+        availableFiles: [],
+        message: "Audio extraction has not been started"
+      });
     }
   } catch (error) {
     console.error('Error checking extraction status:', error);
-    res.status(500).json({
+    res.status(500).json({ 
       error: 'Failed to check extraction status',
-      details: error.message,
-      availableFiles: []
+      details: error.message
     });
   }
 });

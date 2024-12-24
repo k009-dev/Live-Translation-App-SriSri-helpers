@@ -1,6 +1,29 @@
 import { useState, useEffect } from 'react';
 import axios from 'axios';
 import { Toaster, toast } from 'react-hot-toast';
+import { BrowserRouter as Router, Routes, Route, useNavigate } from 'react-router-dom';
+
+// Utility function to format duration
+const formatDuration = (duration) => {
+  if (!duration) return 'N/A';
+  
+  try {
+    const match = duration.match(/PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/);
+    if (!match) return 'N/A';
+
+    const [, hours, minutes, seconds] = match;
+    const parts = [];
+    
+    if (hours) parts.push(`${hours}h`);
+    if (minutes) parts.push(`${minutes}m`);
+    if (seconds) parts.push(`${seconds}s`);
+    
+    return parts.length > 0 ? parts.join(' ') : 'N/A';
+  } catch (error) {
+    console.error('Error formatting duration:', error);
+    return 'N/A';
+  }
+};
 
 // LiveStreamModal Component
 function LiveStreamModal({ isOpen, onClose, onConfirm }) {
@@ -36,46 +59,154 @@ function LiveStreamModal({ isOpen, onClose, onConfirm }) {
   );
 }
 
-function App() {
-  const [url, setUrl] = useState('');
+// Add this component after LiveStreamModal
+function ExtractionStatus({ status }) {
+  if (!status) return null;
+
+  return (
+    <div className="bg-white rounded-lg shadow-lg p-6 mt-4">
+      <h2 className="text-xl font-bold mb-4">Extraction Status</h2>
+      
+      <div className="mb-4">
+        <p className="font-medium">Status: 
+          <span className={`ml-2 px-2 py-1 rounded ${
+            status.status === 'completed' ? 'bg-green-100 text-green-800' :
+            status.status === 'processing' ? 'bg-blue-100 text-blue-800' :
+            status.status === 'error' ? 'bg-red-100 text-red-800' :
+            'bg-gray-100 text-gray-800'
+          }`}>
+            {status.status}
+          </span>
+        </p>
+        {status.progress !== undefined && (
+          <div className="mt-2">
+            <div className="w-full bg-gray-200 rounded-full h-2.5">
+              <div 
+                className="bg-blue-600 h-2.5 rounded-full" 
+                style={{ width: `${status.progress}%` }}
+              ></div>
+            </div>
+            <p className="text-sm text-gray-600 mt-1">Progress: {status.progress.toFixed(1)}%</p>
+          </div>
+        )}
+      </div>
+
+      {status.availableFiles && status.availableFiles.length > 0 && (
+        <div>
+          <h3 className="font-semibold mb-2">Extracted Files:</h3>
+          <div className="bg-gray-50 p-4 rounded-lg max-h-60 overflow-y-auto">
+            {status.availableFiles.map((file, index) => (
+              <div 
+                key={file}
+                className={`py-2 px-3 ${index % 2 === 0 ? 'bg-white' : 'bg-gray-50'} rounded`}
+              >
+                {file}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {status.totalProcessing > 0 && (
+        <p className="mt-2 text-sm text-gray-600">
+          Files being processed: {status.totalProcessing}
+        </p>
+      )}
+
+      {status.error && (
+        <div className="mt-4 p-3 bg-red-50 text-red-700 rounded">
+          Error: {status.error}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// VideoDetails component
+function VideoDetails() {
   const [videoInfo, setVideoInfo] = useState(null);
+  const [extractionStatus, setExtractionStatus] = useState(null);
+
+  useEffect(() => {
+    // Get video ID from URL
+    const videoId = window.location.pathname.split('/').pop();
+    if (videoId) {
+      // Fetch video details
+      axios.post('http://localhost:3001/api/validate-youtube', { 
+        url: `https://www.youtube.com/watch?v=${videoId}`,
+        checkOnly: true 
+      })
+      .then(response => {
+        setVideoInfo(response.data);
+      })
+      .catch(error => {
+        console.error('Error fetching video details:', error);
+        toast.error('Failed to load video details');
+      });
+
+      // Set up polling for extraction status
+      const pollInterval = setInterval(() => {
+        axios.get(`http://localhost:3001/api/extraction-status/${videoId}`)
+          .then(response => {
+            console.log('Extraction status:', response.data);
+            setExtractionStatus(response.data);
+          })
+          .catch(error => {
+            console.error('Error fetching extraction status:', error);
+          });
+      }, 2000); // Poll every 2 seconds
+
+      // Cleanup interval on unmount
+      return () => clearInterval(pollInterval);
+    }
+  }, []);
+
+  return (
+    <div className="min-h-screen bg-gray-100 py-8 px-4">
+      <div className="max-w-4xl mx-auto">
+        {videoInfo ? (
+          <div className="bg-white rounded-lg shadow-lg p-6 text-black">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              <div>
+                <img
+                  src={videoInfo.thumbnails?.maxres?.url || videoInfo.thumbnails?.high?.url}
+                  alt={videoInfo.title}
+                  className="w-full rounded-lg"
+                />
+              </div>
+              <div>
+                <h2 className="text-xl font-semibold mb-4">{videoInfo.title}</h2>
+                <div className="space-y-2">
+                  <p><span className="font-medium">Channel:</span> {videoInfo.channelTitle}</p>
+                  <p><span className="font-medium">Duration:</span> {formatDuration(videoInfo.duration)}</p>
+                  <p><span className="font-medium">Privacy:</span> {videoInfo.privacyStatus}</p>
+                  <p><span className="font-medium">Type:</span> {videoInfo.isLiveContent ? 'Live Content' : 'Regular Video'}</p>
+                </div>
+                <div className="mt-4">
+                  <h3 className="font-medium mb-2">Description:</h3>
+                  <p className="text-sm text-gray-600 max-h-32 overflow-y-auto">
+                    {videoInfo.description || 'No description available'}
+                  </p>
+                </div>
+              </div>
+            </div>
+            <ExtractionStatus status={extractionStatus} />
+          </div>
+        ) : (
+          <div className="text-center">Loading video details...</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Main App component
+function MainApp() {
+  const [url, setUrl] = useState('');
   const [loading, setLoading] = useState(false);
   const [showLiveModal, setShowLiveModal] = useState(false);
   const [pendingLiveUrl, setPendingLiveUrl] = useState(null);
-  const [extractionStatus, setExtractionStatus] = useState(null);
-
-  // Add polling function for extraction status
-  useEffect(() => {
-    let pollInterval;
-
-    if (videoInfo?.savedLocation) {
-      // Start polling immediately
-      checkExtractionStatus(videoInfo.savedLocation);
-      
-      // Set up polling interval (every 2 seconds)
-      pollInterval = setInterval(() => {
-        checkExtractionStatus(videoInfo.savedLocation);
-      }, 2000);
-    }
-
-    // Cleanup polling on unmount or when video changes
-    return () => {
-      if (pollInterval) {
-        clearInterval(pollInterval);
-      }
-    };
-  }, [videoInfo?.savedLocation]);
-
-  // Function to check extraction status
-  const checkExtractionStatus = async (savedLocation) => {
-    try {
-      const response = await axios.get(`http://localhost:3001/api/extraction-status/${savedLocation}`);
-      console.log('Extraction status response:', response.data); // Debug logging
-      setExtractionStatus(response.data);
-    } catch (error) {
-      console.error('Error checking extraction status:', error);
-    }
-  };
+  const navigate = useNavigate();
 
   const handleLiveStreamChoice = async (choice) => {
     setShowLiveModal(false);
@@ -87,12 +218,14 @@ function App() {
         url: pendingLiveUrl,
         liveStreamChoice: choice 
       });
-      setVideoInfo(response.data);
       
       toast.success('Live stream processing started!', {
         duration: 4000,
         icon: '🎥'
       });
+
+      // Navigate to details page
+      navigate(`/details/${response.data.id}`);
     } catch (error) {
       console.error('Error:', error);
       toast.error(error.response?.data?.error || 'Failed to process live stream');
@@ -105,8 +238,6 @@ function App() {
   const validateUrl = async (e) => {
     e.preventDefault();
     setLoading(true);
-    setVideoInfo(null);
-    setExtractionStatus(null);
     
     try {
       // First, check if it's a live stream
@@ -115,6 +246,8 @@ function App() {
         checkOnly: true 
       });
 
+      console.log('Initial check response:', checkResponse.data);
+
       if (checkResponse.data.isLiveContent) {
         setPendingLiveUrl(url);
         setShowLiveModal(true);
@@ -122,35 +255,37 @@ function App() {
         return;
       }
 
-      // If not live, proceed normally
-      const response = await axios.post('http://localhost:3001/api/validate-youtube', { url });
-      setVideoInfo(response.data);
+      // Extract videoId first from URL, then fallback to response
+      const urlVideoId = url.match(/(?:youtu\.be\/|youtube\.com(?:\/embed\/|\/v\/|\/watch\?v=|\/user\/\S+|\/ytscreeningroom\?v=|\/sandalsResorts#\w\/\w\/.*\/))([^\/&\n?\s]{11})/)?.[1];
+      const videoId = urlVideoId || checkResponse.data.id;
+      console.log('Extracted videoId:', videoId, 'from URL:', urlVideoId, 'from response:', checkResponse.data.id);
       
-      if (response.data.isExisting) {
-        if (response.data.audioStatus?.exists) {
-          toast.success('Video and audio already exist!', {
-            duration: 4000,
-            icon: '📁'
+      if (videoId) {
+        // Start the extraction process in the background
+        axios.post('http://localhost:3001/api/validate-youtube', { url })
+          .then(() => {
+            console.log('Extraction process started in background');
+          })
+          .catch(error => {
+            console.error('Background extraction error:', error);
           });
-        } else if (response.data.audioExtraction) {
-          toast.success('Video exists, started audio extraction!', {
-            duration: 4000,
-            icon: '🎵'
-          });
-        } else {
-          toast.error('Video exists but audio extraction failed', {
-            duration: 4000,
-            icon: '⚠️'
-          });
-        }
-      } else {
-        toast.success('Video validated and audio extraction started!', {
+
+        // Immediately navigate to details page
+        console.log('Navigating to:', `/details/${videoId}`);
+        navigate(`/details/${videoId}`);
+        
+        // Show success toast
+        toast.success('Video validated and processing started!', {
           duration: 4000,
           icon: '✅'
         });
+      } else {
+        console.error('No videoId found in URL or response');
+        toast.error('Could not process video. Invalid video ID.');
       }
+
     } catch (error) {
-      console.error('Error:', error);
+      console.error('Validation error:', error);
       
       if (error.code === 'ERR_NETWORK') {
         toast.error('Cannot connect to server. Please make sure the backend is running.', {
@@ -158,9 +293,6 @@ function App() {
         });
       } else {
         const errorMessage = error.response?.data?.error || 'Failed to validate URL';
-        const errorDetails = error.response?.data?.details;
-        
-        console.error('Error details:', { message: errorMessage, details: errorDetails });
         toast.error(errorMessage);
         
         if (error.response?.status === 403) {
@@ -171,27 +303,6 @@ function App() {
       }
     } finally {
       setLoading(false);
-    }
-  };
-
-  const formatDuration = (duration) => {
-    if (!duration) return 'N/A';
-    
-    try {
-      const match = duration.match(/PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/);
-      if (!match) return 'N/A';
-
-      const [, hours, minutes, seconds] = match;
-      const parts = [];
-      
-      if (hours) parts.push(`${hours}h`);
-      if (minutes) parts.push(`${minutes}m`);
-      if (seconds) parts.push(`${seconds}s`);
-      
-      return parts.length > 0 ? parts.join(' ') : 'N/A';
-    } catch (error) {
-      console.error('Error formatting duration:', error);
-      return 'N/A';
     }
   };
 
@@ -229,135 +340,20 @@ function App() {
             </button>
           </div>
         </form>
-
-        {videoInfo && (
-          <div className="bg-white rounded-lg shadow-lg p-6 text-black">
-            {videoInfo.isExisting && (
-              <div className="mb-4 p-3 bg-blue-50 text-blue-700 rounded-lg">
-                <p className="font-medium">
-                  ℹ️ This video was previously validated and saved as "{videoInfo.savedLocation}"
-                </p>
-              </div>
-            )}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              <div>
-                <img
-                  src={videoInfo.thumbnails.maxres?.url || videoInfo.thumbnails.high?.url}
-                  alt={videoInfo.title}
-                  className="w-full rounded-lg"
-                />
-              </div>
-              <div>
-                <h2 className="text-xl font-semibold mb-4">{videoInfo.title}</h2>
-                <div className="space-y-2">
-                  <p><span className="font-medium">Channel:</span> {videoInfo.channelTitle}</p>
-                  <p><span className="font-medium">Duration:</span> {formatDuration(videoInfo.duration)}</p>
-                  <p><span className="font-medium">Privacy:</span> {videoInfo.privacyStatus}</p>
-                  <p><span className="font-medium">Type:</span> {videoInfo.isLiveContent ? 'Live Content' : 'Regular Video'}</p>
-                  <p><span className="font-medium">Saved Location:</span> {videoInfo.savedLocation}</p>
-                </div>
-                <div className="mt-4">
-                  <h3 className="font-medium mb-2">Description:</h3>
-                  <p className="text-sm text-gray-600 max-h-32 overflow-y-auto">
-                    {videoInfo.description || 'No description available'}
-                  </p>
-                </div>
-                {videoInfo.liveStreamingDetails && (
-                  <div className="mt-4">
-                    <h3 className="font-medium mb-2">Live Stream Details:</h3>
-                    <div className="text-sm text-gray-600">
-                      {videoInfo.liveStreamingDetails.scheduledStartTime && (
-                        <p>Scheduled Start: {new Date(videoInfo.liveStreamingDetails.scheduledStartTime).toLocaleString()}</p>
-                      )}
-                      {videoInfo.liveStreamingDetails.actualStartTime && (
-                        <p>Actual Start: {new Date(videoInfo.liveStreamingDetails.actualStartTime).toLocaleString()}</p>
-                      )}
-                    </div>
-                  </div>
-                )}
-              </div>
-            </div>
-            
-            {/* Add extraction status display */}
-            {extractionStatus && (
-              <div className="mt-4 p-4 bg-gray-50 rounded-lg">
-                <h3 className="font-medium mb-2">Extraction Status:</h3>
-                <div className="space-y-2">
-                  {extractionStatus.type === 'live' && (
-                    <>
-                      <p className="text-sm">
-                        <span className="font-medium">Status:</span> Active
-                      </p>
-                      <p className="text-sm">
-                        <span className="font-medium">Available Fragments:</span> {extractionStatus.chunkCount || 0}
-                        {extractionStatus.totalProcessing > extractionStatus.chunkCount && (
-                          <span className="text-gray-500 ml-2">
-                            ({extractionStatus.totalProcessing - extractionStatus.chunkCount} processing)
-                          </span>
-                        )}
-                      </p>
-                      {extractionStatus.availableFiles && extractionStatus.availableFiles.length > 0 && (
-                        <div className="text-sm">
-                          <p className="font-medium mb-1">Available Files:</p>
-                          <div className="max-h-32 overflow-y-auto bg-white p-2 rounded border">
-                            {extractionStatus.availableFiles.map((file, index) => (
-                              <p key={index} className="text-xs text-gray-600">
-                                {file} {file === extractionStatus.latestChunk && 
-                                  <span className="text-blue-500 text-xs">(Latest)</span>}
-                              </p>
-                            ))}
-                          </div>
-                        </div>
-                      )}
-                    </>
-                  )}
-                  {extractionStatus.type === 'normal' && (
-                    <>
-                      <p className="text-sm">
-                        <span className="font-medium">Status:</span>{' '}
-                        {extractionStatus.status === 'completed' ? 'Completed' :
-                         extractionStatus.status === 'error' ? 'Error' :
-                         extractionStatus.status === 'downloading' ? 'Downloading' : 'Processing'}
-                      </p>
-                      {extractionStatus.progress !== undefined && (
-                        <div className="space-y-1">
-                          <p className="text-sm">
-                            <span className="font-medium">Progress:</span> {Math.round(extractionStatus.progress)}%
-                          </p>
-                          <div className="w-full bg-gray-200 rounded-full h-2.5">
-                            <div 
-                              className="bg-blue-600 h-2.5 rounded-full transition-all duration-300" 
-                              style={{ width: `${extractionStatus.progress}%` }}
-                            ></div>
-                          </div>
-                        </div>
-                      )}
-                      {extractionStatus.error && (
-                        <p className="text-sm text-red-600">
-                          Error: {extractionStatus.error}
-                        </p>
-                      )}
-                      {extractionStatus.availableFiles?.length > 0 && (
-                        <div className="text-sm">
-                          <p className="font-medium mb-1">Available Files:</p>
-                          <div className="max-h-32 overflow-y-auto bg-white p-2 rounded border">
-                            {extractionStatus.availableFiles.map((file, index) => (
-                              <p key={index} className="text-xs text-gray-600">
-                                {file}
-                              </p>
-                            ))}
-                          </div>
-                        </div>
-                      )}
-                    </>
-                  )}
-                </div>
-              </div>
-            )}
-          </div>
-        )}
       </div>
     </div>
+  );
+}
+
+// Wrap the app with Router
+function App() {
+  return (
+    <Router>
+      <Routes>
+        <Route path="/" element={<MainApp />} />
+        <Route path="/details/:videoId" element={<VideoDetails />} />
+      </Routes>
+    </Router>
   );
 }
 

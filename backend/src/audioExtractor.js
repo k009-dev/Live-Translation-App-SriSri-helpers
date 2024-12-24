@@ -5,7 +5,8 @@ import { createWriteStream } from 'fs';
 import { spawn } from 'child_process';
 import { open } from 'fs/promises';  // For file lock checking
 
-const AUDIO_BASE_DIR = path.join(process.cwd(), 'temp_files', 'ExtractedAudio');
+// Update base directory constant
+const BASE_TEMP_DIR = path.join(process.cwd(), 'temp_files');
 
 // Ensure directory exists
 async function ensureDirectoryExists(dirPath) {
@@ -14,6 +15,34 @@ async function ensureDirectoryExists(dirPath) {
   } catch {
     await fs.mkdir(dirPath, { recursive: true });
   }
+}
+
+// Create video directory structure
+async function createVideoDirectoryStructure(videoId) {
+  const videoDir = path.join(BASE_TEMP_DIR, videoId);
+  const extractedAudioDir = path.join(videoDir, 'ExtractedAudio');
+  const preprocessingDir = path.join(extractedAudioDir, 'PreProcessing');
+  const finalExtractedDir = path.join(extractedAudioDir, 'FinalExtracted');
+
+  await ensureDirectoryExists(videoDir);
+  await ensureDirectoryExists(extractedAudioDir);
+  await ensureDirectoryExists(preprocessingDir);
+  await ensureDirectoryExists(finalExtractedDir);
+
+  return {
+    videoDir,
+    extractedAudioDir,
+    preprocessingDir,
+    finalExtractedDir
+  };
+}
+
+// Save video details
+async function saveVideoDetails(videoId, details) {
+  const videoDir = path.join(BASE_TEMP_DIR, videoId);
+  await ensureDirectoryExists(videoDir);
+  const detailsPath = path.join(videoDir, 'ytVideoDetails.json');
+  await fs.writeFile(detailsPath, JSON.stringify(details, null, 2));
 }
 
 // Get video information
@@ -80,20 +109,17 @@ async function getVideoInfo(url) {
 }
 
 // Extract audio from normal video
-async function extractNormalAudio(videoUrl, outputDir) {
+async function extractNormalAudio(videoUrl, videoId) {
   return new Promise(async (resolve, reject) => {
     try {
       console.log('Starting audio extraction...');
       
       // Create directory structure
-      const preprocessingDir = path.join(outputDir, 'PreProcessing');
-      const finalExtractedDir = path.join(outputDir, 'FinalExtracted');
-      await ensureDirectoryExists(preprocessingDir);
-      await ensureDirectoryExists(finalExtractedDir);
+      const { preprocessingDir, finalExtractedDir } = await createVideoDirectoryStructure(videoId);
+      const statusPath = path.join(preprocessingDir, 'status.json');
       
-      // Use numbered fragments for output with WAV format
+      // Use fragment-N naming for consistency
       const preprocessingTemplate = path.join(preprocessingDir, 'fragment-%d.wav');
-      const statusPath = path.join(outputDir, 'status.json');
       
       // Initialize status file
       const initialStatus = {
@@ -147,17 +173,20 @@ async function extractNormalAudio(videoUrl, outputDir) {
           if (previousFragment >= 0) {
             const fragmentName = `fragment-${previousFragment}.wav`;
             const preprocessingPath = path.join(preprocessingDir, fragmentName);
+            const finalPath = path.join(finalExtractedDir, fragmentName);
             
-            // Check if file exists and is not locked
             try {
+              // Check if file exists and is not locked
               const locked = await isFileLocked(preprocessingPath);
               if (!locked) {
-                await moveToFinalExtracted(path.basename(outputDir), fragmentName);
+                // Copy to FinalExtracted
+                await fs.copyFile(preprocessingPath, finalPath);
+                console.log(`Moved fragment ${fragmentName} to FinalExtracted`);
                 
                 // Update status with progress
                 const progressStatus = {
                   status: 'processing',
-                  progress: Math.min(95, (currentFragment / 20) * 100), // Estimate progress
+                  progress: Math.min(95, (currentFragment / 20) * 100),
                   currentFragment: currentFragment,
                   lastUpdate: new Date().toISOString()
                 };
@@ -201,22 +230,44 @@ async function extractNormalAudio(videoUrl, outputDir) {
         if (code === 0) {
           console.log('Audio extraction and segmentation completed successfully');
           
-          // Update status file with completion
-          const completionStatus = {
-            status: 'completed',
-            progress: 100,
-            completionTime: new Date().toISOString(),
-            totalFragments: currentFragment
-          };
-          
-          await fs.writeFile(statusPath, JSON.stringify(completionStatus));
-          
-          resolve({
-            status: 'completed',
-            outputDir: finalExtractedDir,
-            message: 'Audio extraction completed successfully',
-            totalFragments: currentFragment
-          });
+          try {
+            // Move the last fragment if it exists
+            if (currentFragment > 0) {
+              const lastFragmentName = `fragment-${currentFragment - 1}.wav`;
+              const lastPreprocessingPath = path.join(preprocessingDir, lastFragmentName);
+              const lastFinalPath = path.join(finalExtractedDir, lastFragmentName);
+              
+              try {
+                const locked = await isFileLocked(lastPreprocessingPath);
+                if (!locked) {
+                  await fs.copyFile(lastPreprocessingPath, lastFinalPath);
+                  console.log(`Moved final fragment ${lastFragmentName} to FinalExtracted`);
+                }
+              } catch (error) {
+                console.error(`Error moving final fragment ${lastFragmentName}:`, error);
+              }
+            }
+            
+            // Update status file with completion
+            const completionStatus = {
+              status: 'completed',
+              progress: 100,
+              completionTime: new Date().toISOString(),
+              totalFragments: currentFragment
+            };
+            
+            await fs.writeFile(statusPath, JSON.stringify(completionStatus));
+            
+            resolve({
+              status: 'completed',
+              outputDir: finalExtractedDir,
+              message: 'Audio extraction completed successfully',
+              totalFragments: currentFragment
+            });
+          } catch (error) {
+            console.error('Error in completion handling:', error);
+            reject(error);
+          }
         } else {
           const errorMsg = `FFmpeg process failed with code ${code}`;
           console.error(errorMsg);
@@ -257,30 +308,28 @@ async function extractNormalAudio(videoUrl, outputDir) {
 // Check if file is locked (being written to)
 async function isFileLocked(filePath) {
   try {
-    const fileHandle = await open(filePath, 'r+');
+    // First check if file exists
+    await fs.access(filePath);
+    
+    // Get file stats to ensure it has content
+    const stats = await fs.stat(filePath);
+    if (stats.size === 0) {
+      return true; // Consider empty files as locked
+    }
+
+    // Try to open the file for reading
+    const fileHandle = await open(filePath, 'r');
     await fileHandle.close();
     return false;  // File is not locked
   } catch (error) {
-    if (error.code === 'EBUSY') {
-      return true;   // File is locked
+    if (error.code === 'ENOENT') {
+      return true; // File doesn't exist yet
     }
-    throw error;     // Other error
-  }
-}
-
-// Move file from preprocessing to final extracted
-async function moveToFinalExtracted(videoId, fragmentName) {
-  const preprocessingPath = path.join(AUDIO_BASE_DIR, videoId, 'PreProcessing', fragmentName);
-  const finalPath = path.join(AUDIO_BASE_DIR, videoId, 'FinalExtracted', fragmentName);
-  
-  try {
-    await fs.copyFile(preprocessingPath, finalPath);
-    // Don't delete from preprocessing - keep as backup
-    console.log(`Moved ${fragmentName} to FinalExtracted`);
-    return true;
-  } catch (error) {
-    console.error(`Error moving ${fragmentName} to FinalExtracted:`, error);
-    return false;
+    if (error.code === 'EBUSY' || error.code === 'EPERM') {
+      return true; // File is locked
+    }
+    console.error('Error checking file lock:', error);
+    return true; // Assume locked on any error
   }
 }
 
@@ -289,6 +338,7 @@ async function extractLiveAudioChunks(videoUrl, outputDir, liveStreamChoice) {
   return new Promise(async (resolve, reject) => {
     let process;
     let isShuttingDown = false;
+    let currentFragment = 0;
 
     try {
       console.log('Starting live stream audio extraction...');
@@ -299,7 +349,7 @@ async function extractLiveAudioChunks(videoUrl, outputDir, liveStreamChoice) {
       await fs.mkdir(preprocessingDir, { recursive: true });
       await fs.mkdir(finalExtractedDir, { recursive: true });
       
-      // Use numbered fragments for output with WAV format
+      // Use fragment-N naming for output with WAV format
       const preprocessingTemplate = path.join(preprocessingDir, 'fragment-%d.wav');
       
       // Base command arguments
@@ -337,15 +387,10 @@ async function extractLiveAudioChunks(videoUrl, outputDir, liveStreamChoice) {
       // Pipe yt-dlp output to ffmpeg
       process.stdout.pipe(ffmpegProcess.stdin);
 
-      let error = '';
-      let lastProgressTime = Date.now();
-      let currentFragment = 0;
-
       // Monitor ffmpeg output for segment completion
       ffmpegProcess.stderr.on('data', async (data) => {
         const output = data.toString();
         console.log('FFmpeg output:', output);
-        lastProgressTime = Date.now();
 
         // Check for segment completion message
         if (output.includes('Opening')) {
@@ -354,12 +399,15 @@ async function extractLiveAudioChunks(videoUrl, outputDir, liveStreamChoice) {
           if (previousFragment >= 0) {
             const fragmentName = `fragment-${previousFragment}.wav`;
             const preprocessingPath = path.join(preprocessingDir, fragmentName);
+            const finalPath = path.join(finalExtractedDir, fragmentName);
             
-            // Check if file exists and is not locked
             try {
+              // Check if file exists and is not locked
               const locked = await isFileLocked(preprocessingPath);
               if (!locked) {
-                await moveToFinalExtracted(path.basename(outputDir), fragmentName);
+                // Copy to FinalExtracted
+                await fs.copyFile(preprocessingPath, finalPath);
+                console.log(`Moved fragment ${fragmentName} to FinalExtracted`);
               }
             } catch (error) {
               console.error('Error checking/moving fragment:', error);
@@ -369,31 +417,17 @@ async function extractLiveAudioChunks(videoUrl, outputDir, liveStreamChoice) {
         }
       });
 
-      // Set up progress check interval
-      const progressInterval = setInterval(async () => {
-        const now = Date.now();
-        if (now - lastProgressTime > 60000 && !isShuttingDown) {
-          console.error('No progress for 1 minute, restarting stream...');
-          try {
-            process.kill();
-            ffmpegProcess.kill();
-          } catch (err) {
-            console.error('Error killing stalled process:', err);
-          }
-        }
-      }, 10000);
-
+      // Handle yt-dlp errors
       process.stderr.on('data', (data) => {
         const errorStr = data.toString();
-        error += errorStr;
         console.error('Live stream error:', errorStr);
       });
 
       // Resolve immediately for live streams as it's an ongoing process
       resolve({
         status: 'started',
-        outputDir: finalExtractedDir,  // Return the final directory path
-        preprocessingDir,              // Also return preprocessing directory
+        outputDir: finalExtractedDir,
+        preprocessingDir,
         message: 'Live audio extraction started in fragments',
         type: 'live',
         format: {
@@ -404,7 +438,6 @@ async function extractLiveAudioChunks(videoUrl, outputDir, liveStreamChoice) {
         },
         stop: () => {
           isShuttingDown = true;
-          clearInterval(progressInterval);
           if (process) process.kill();
           if (ffmpegProcess) ffmpegProcess.kill();
         }
@@ -412,9 +445,8 @@ async function extractLiveAudioChunks(videoUrl, outputDir, liveStreamChoice) {
 
       // Handle process completion and errors
       process.on('close', (code) => {
-        clearInterval(progressInterval);
         if (code !== 0 && !isShuttingDown) {
-          console.error('Live stream extraction ended with error:', error);
+          console.error('Live stream extraction ended with error');
           console.log('Attempting to restart stream extraction...');
           setTimeout(() => {
             extractLiveAudioChunks(videoUrl, outputDir, liveStreamChoice)
@@ -424,7 +456,6 @@ async function extractLiveAudioChunks(videoUrl, outputDir, liveStreamChoice) {
       });
 
       process.on('error', (err) => {
-        clearInterval(progressInterval);
         console.error('Live stream process error:', err);
         if (!isShuttingDown) {
           setTimeout(() => {
@@ -447,13 +478,9 @@ async function extractLiveAudioChunks(videoUrl, outputDir, liveStreamChoice) {
   });
 }
 
-// Extract audio from video
+// Extract audio from video (main function)
 async function extractAudio(videoUrl, videoId, isLive, liveStreamChoice) {
   try {
-    // Create output directory
-    const outputDir = path.join(AUDIO_BASE_DIR, videoId);
-    await ensureDirectoryExists(outputDir);
-
     // Get video info first
     const info = await getVideoInfo(videoUrl);
     console.log('Video info retrieved:', {
@@ -462,16 +489,22 @@ async function extractAudio(videoUrl, videoId, isLive, liveStreamChoice) {
       isLive: info._type === 'live' || info.is_live
     });
 
+    // Create directory structure and save video details
+    const { videoDir } = await createVideoDirectoryStructure(videoId);
+    const detailsPath = path.join(videoDir, 'ytVideoDetails.json');
+    await fs.writeFile(detailsPath, JSON.stringify(info, null, 2));
+
     // If it's a live stream
     if (isLive) {
       if (!liveStreamChoice) {
         throw new Error('Live stream choice is required for live content');
       }
-      return extractLiveAudioChunks(videoUrl, outputDir, liveStreamChoice);
+      const { extractedAudioDir } = await createVideoDirectoryStructure(videoId);
+      return extractLiveAudioChunks(videoUrl, extractedAudioDir, liveStreamChoice);
     }
 
     // For normal videos
-    return extractNormalAudio(videoUrl, outputDir);
+    return extractNormalAudio(videoUrl, videoId);
   } catch (error) {
     console.error('Error in extractAudio:', error);
     throw error;
