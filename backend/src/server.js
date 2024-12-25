@@ -7,6 +7,8 @@ import path from 'path';
 import { extractAudio } from './audioExtractor.js';
 import { setupTranscriptionWatcher, getTranscriptionStatus } from './transcriptionHandler.js';
 import { setupTranslationWatcher, getTranslationStatus } from './translationIntegrator.js';
+import { setupAudioWatcher, getAudioStatus } from './audioIntegrator.js';
+import AudioSyncManager from './audioSyncManager.js';
 
 dotenv.config();
 
@@ -114,6 +116,34 @@ async function startTranslationWatcher(videoId) {
         const watcher = await setupTranslationWatcher(videoId);
         activeTranslationWatchers.set(videoId, watcher);
     }
+}
+
+// Store active audio watchers
+const activeAudioWatchers = new Map();
+
+// Function to start audio watcher for a video
+async function startAudioWatcher(videoId) {
+    if (!activeAudioWatchers.has(videoId)) {
+        const watcher = await setupAudioWatcher(videoId);
+        activeAudioWatchers.set(videoId, watcher);
+    }
+}
+
+// Map to store active audio sync managers
+const audioSyncManagers = new Map();
+
+// Function to start audio sync manager for a video
+async function startAudioSyncManager(videoId) {
+    if (audioSyncManagers.has(videoId)) {
+        console.log('Audio sync manager already running for video:', videoId);
+        return;
+    }
+
+    const syncManager = new AudioSyncManager(videoId);
+    audioSyncManagers.set(videoId, syncManager);
+    
+    // Start the sync manager
+    await syncManager.start();
 }
 
 // Validate YouTube URL and get video information
@@ -233,6 +263,11 @@ app.post('/api/validate-youtube', async (req, res) => {
         // Start translation watcher after transcription watcher
         startTranslationWatcher(videoId).catch(error => {
           console.error('Error starting translation watcher:', error);
+        });
+
+        // Start audio watcher after translation watcher
+        startAudioWatcher(videoId).catch(error => {
+          console.error('Error starting audio watcher:', error);
         });
       }
 
@@ -415,6 +450,47 @@ app.get('/api/translation-status/:videoId', async (req, res) => {
             details: error.message
         });
     }
+});
+
+// Add new endpoint for audio generation status
+app.get('/api/audio-status/:videoId', async (req, res) => {
+    try {
+        const { videoId } = req.params;
+        const status = await getAudioStatus(videoId);
+        res.json(status);
+    } catch (error) {
+        console.error('Error getting audio status:', error);
+        res.status(500).json({ error: 'Failed to get audio status' });
+    }
+});
+
+// Update the existing video processing endpoint to include audio generation
+app.post('/api/process-video', async (req, res) => {
+    try {
+        const { videoUrl } = req.body;
+        
+        // ... existing validation and extraction code ...
+
+        // Start audio generation watcher after transcription is set up
+        const audioWatcher = await setupAudioWatcher(videoId);
+        
+        res.json({
+            status: 'success',
+            message: 'Video processing started',
+            videoId
+        });
+    } catch (error) {
+        console.error('Error processing video:', error);
+        res.status(500).json({ error: 'Failed to process video' });
+    }
+});
+
+// Update the translation watcher to start audio sync after translations
+activeTranslationWatchers.forEach(async (watcher, videoId) => {
+    watcher.on('change', async (eventType, filename) => {
+        // Start audio sync manager after translation is complete
+        await startAudioSyncManager(videoId);
+    });
 });
 
 app.listen(PORT, () => {

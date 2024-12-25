@@ -1,281 +1,195 @@
-import dotenv from 'dotenv';
-import axios from 'axios';
 import fs from 'fs/promises';
 import path from 'path';
+import dotenv from 'dotenv';
 
-dotenv.config();
+// Configure dotenv with the path to your .env file
+dotenv.config({ path: path.join(process.cwd(), 'backend', '.env') });
 
-// Configuration
-if (!process.env.ELEVENLABS_API_KEY) {
+// Check if API key exists
+const ELEVEN_LABS_API_KEY = process.env.ELEVENLABS_API_KEY;
+if (!ELEVEN_LABS_API_KEY) {
     console.error('Error: ELEVENLABS_API_KEY is not set in environment variables');
     process.exit(1);
 }
 
-const ELEVEN_LABS_API_KEY = process.env.ELEVENLABS_API_KEY;
-const ELEVEN_LABS_MODEL = "eleven_multilingual_v2";
-let ELEVEN_LABS_VOICE_ID = null;
+const API_URL = 'https://api.elevenlabs.io/v1';
 
-// Constants
-const MAX_CHUNK_LENGTH = 2500; // Maximum characters per API call
-const RATE_LIMIT_DELAY = 1000; // 1 second between API calls
-const MAX_RETRIES = 3;
-const RETRY_DELAY = 2000;
-
-// Voice quality presets
-const VOICE_SETTINGS = {
-    default: {
-        stability: 0.5,
-        similarity_boost: 0.75,
-        style: 0.0,
-        use_speaker_boost: true
-    },
-    high_quality: {
-        stability: 0.7,
-        similarity_boost: 0.8,
-        style: 0.0,
-        use_speaker_boost: true
-    },
-    maximum_quality: {
-        stability: 0.9,
-        similarity_boost: 0.9,
-        style: 0.0,
-        use_speaker_boost: true
-    }
-};
-
-// Language-specific voice mappings
-const LANGUAGE_VOICE_MAPPINGS = {
-    hi: "Hindi",
-    mr: "Marathi",
-    gu: "Gujarati",
-    ta: "Tamil",
-    te: "Telugu",
-    ml: "Malayalam",
-    kn: "Kannada",
-    pa: "Punjabi",
-    fr: "French",
-    ru: "Russian",
-    es: "Spanish",
-    sa: "Sanskrit"
-};
+// Cache for voice IDs
+let voiceCache = null;
 
 /**
- * Rate limiter utility
+ * Fetch available voices from ElevenLabs API
  */
-const rateLimiter = {
-    lastCall: 0,
-    async wait() {
-        const now = Date.now();
-        const timeSinceLastCall = now - this.lastCall;
-        if (timeSinceLastCall < RATE_LIMIT_DELAY) {
-            await new Promise(resolve => setTimeout(resolve, RATE_LIMIT_DELAY - timeSinceLastCall));
-        }
-        this.lastCall = Date.now();
-    }
-};
+async function getVoices() {
+    try {
+        if (voiceCache) return voiceCache;
 
-/**
- * Retry wrapper for API calls
- */
-async function withRetry(operation) {
-    for (let i = 0; i < MAX_RETRIES; i++) {
-        try {
-            await rateLimiter.wait();
-            return await operation();
-        } catch (error) {
-            if (i === MAX_RETRIES - 1) throw error;
-            console.log(`Attempt ${i + 1} failed, retrying in ${RETRY_DELAY}ms...`);
-            await new Promise(resolve => setTimeout(resolve, RETRY_DELAY));
-        }
-    }
-}
-
-/**
- * Split text into chunks for API processing
- */
-function splitIntoChunks(text) {
-    const chunks = [];
-    let currentChunk = '';
-    const sentences = text.match(/[^.!?]+[.!?]+/g) || [text];
-
-    for (const sentence of sentences) {
-        if (currentChunk.length + sentence.length <= MAX_CHUNK_LENGTH) {
-            currentChunk += sentence;
-        } else {
-            if (currentChunk) chunks.push(currentChunk.trim());
-            currentChunk = sentence;
-        }
-    }
-    if (currentChunk) chunks.push(currentChunk.trim());
-    return chunks;
-}
-
-/**
- * Fetch available voices from Eleven Labs
- */
-async function getAvailableVoices() {
-    return await withRetry(async () => {
-        const response = await axios({
-            method: 'GET',
-            url: 'https://api.elevenlabs.io/v1/voices',
+        const response = await fetch(`${API_URL}/voices`, {
             headers: {
                 'xi-api-key': ELEVEN_LABS_API_KEY
             }
         });
 
-        if (response.status === 200 && response.data.voices) {
-            const voices = response.data.voices.map(v => ({
-                name: v.name,
-                voice_id: v.voice_id,
-                languages: v.labels?.language || [],
-                preview_url: v.preview_url
-            }));
-
-            // Set default voice if none specified
-            if (!ELEVEN_LABS_VOICE_ID && voices.length > 0) {
-                ELEVEN_LABS_VOICE_ID = voices[0].voice_id;
-            }
-
-            return voices;
+        if (!response.ok) {
+            throw new Error(`Failed to fetch voices: ${response.status} ${response.statusText}`);
         }
-        throw new Error('No voices found in the response');
-    });
-}
 
-/**
- * Find best voice for a language
- */
-async function findBestVoiceForLanguage(language, voices) {
-    const langCode = language.toLowerCase();
-    const langName = LANGUAGE_VOICE_MAPPINGS[langCode] || language;
-
-    // Try to find a voice specifically for this language
-    let voice = voices.find(v => 
-        v.languages.some(l => 
-            l.toLowerCase() === langCode || 
-            l.toLowerCase() === langName.toLowerCase()
-        )
-    );
-
-    // If no specific voice found, use default multilingual voice
-    if (!voice) {
-        voice = voices.find(v => v.languages.includes('multilingual')) || voices[0];
-    }
-
-    return voice?.voice_id || ELEVEN_LABS_VOICE_ID;
-}
-
-/**
- * Generate audio using Eleven Labs TTS API
- */
-async function generateAudio(text, language, voiceId = ELEVEN_LABS_VOICE_ID, quality = 'default') {
-    if (!text.trim()) {
-        throw new Error('Empty text provided');
-    }
-
-    const chunks = splitIntoChunks(text);
-    const audioChunks = [];
-
-    for (const chunk of chunks) {
-        const audio = await withRetry(async () => {
-            const response = await axios({
-                method: 'POST',
-                url: `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`,
-                headers: {
-                    'Accept': 'audio/mpeg',
-                    'xi-api-key': ELEVEN_LABS_API_KEY,
-                    'Content-Type': 'application/json',
-                },
-                data: {
-                    text: chunk,
-                    model_id: ELEVEN_LABS_MODEL,
-                    voice_settings: VOICE_SETTINGS[quality] || VOICE_SETTINGS.default
-                },
-                responseType: 'arraybuffer'
-            });
-
-            return response.data;
+        const data = await response.json();
+        
+        // Create a map of language to voice ID
+        const voiceMap = {};
+        data.voices.forEach(voice => {
+            // Use the first available voice for each language
+            // You might want to customize this selection logic
+            if (!voiceMap[voice.name]) {
+                voiceMap[voice.name] = voice.voice_id;
+            }
         });
 
-        audioChunks.push(audio);
+        voiceCache = voiceMap;
+        return voiceMap;
+    } catch (error) {
+        console.error('Error fetching voices:', error);
+        return null;
     }
-
-    // Combine audio chunks
-    const combinedAudio = Buffer.concat(audioChunks);
-    return `data:audio/mpeg;base64,${combinedAudio.toString('base64')}`;
 }
 
 /**
- * Process languages in pairs for audio generation
+ * Validate API key
+ */
+async function validateApiKey() {
+    try {
+        const response = await fetch(`${API_URL}/user/subscription`, {
+            headers: {
+                'xi-api-key': ELEVEN_LABS_API_KEY
+            }
+        });
+
+        if (!response.ok) {
+            throw new Error(`Invalid API key: ${response.status} ${response.statusText}`);
+        }
+
+        const data = await response.json();
+        console.log('API key validated successfully. Character quota:', data.character_count, '/', data.character_limit);
+        return true;
+    } catch (error) {
+        console.error('API key validation failed:', error);
+        return false;
+    }
+}
+
+/**
+ * Generate audio for a single text using ElevenLabs API
+ */
+async function generateAudio(text, language) {
+    try {
+        if (!text || !language) {
+            console.error('Missing required parameters for audio generation');
+            return null;
+        }
+
+        // Validate API key first
+        const isValid = await validateApiKey();
+        if (!isValid) {
+            throw new Error('Invalid API key');
+        }
+
+        // Get available voices
+        const voices = await getVoices();
+        if (!voices) {
+            throw new Error('Failed to fetch voices');
+        }
+
+        // Select a voice for the language
+        const voiceId = voices[language] || Object.values(voices)[0]; // Fallback to first available voice
+        if (!voiceId) {
+            throw new Error(`No voice found for language: ${language}`);
+        }
+
+        console.log(`Using voice ID ${voiceId} for ${language}`);
+        
+        const response = await fetch(`${API_URL}/text-to-speech/${voiceId}`, {
+            method: 'POST',
+            headers: {
+                'Accept': 'audio/mpeg',
+                'Content-Type': 'application/json',
+                'xi-api-key': ELEVEN_LABS_API_KEY
+            },
+            body: JSON.stringify({
+                text: text,
+                model_id: 'eleven_multilingual_v2',
+                voice_settings: {
+                    stability: 0.5,
+                    similarity_boost: 0.75,
+                    style: 0.5,
+                    use_speaker_boost: true
+                }
+            })
+        });
+
+        if (!response.ok) {
+            const errorText = await response.text();
+            throw new Error(`ElevenLabs API error: ${response.status} ${response.statusText}\n${errorText}`);
+        }
+
+        const audioBuffer = await response.arrayBuffer();
+        return Buffer.from(audioBuffer);
+    } catch (error) {
+        console.error(`Error generating audio for ${language}:`, error);
+        return null;
+    }
+}
+
+/**
+ * Process a pair of languages in parallel
  */
 async function processLanguagesInPairs(translations, languages) {
-    const audioResults = {};
-    const languagePairs = [];
-    
-    // Create pairs of languages
-    for (let i = 0; i < languages.length; i += 2) {
-        const pair = languages.slice(i, i + 2);
-        languagePairs.push(pair);
-    }
-
-    // Get available voices
-    const voices = await getAvailableVoices();
-
-    // Process each pair sequentially
-    for (const pair of languagePairs) {
-        console.log(`Processing language pair: ${pair.join(', ')}`);
+    try {
+        console.log(`Processing language pair: ${languages.join(', ')}`);
         
-        // Process the pair in parallel
-        const pairResults = await Promise.all(pair.map(async (lang) => {
-            const translation = translations[lang];
-            if (!translation?.text) return { [`${lang}_audio`]: null };
-
-            try {
-                const voiceId = await findBestVoiceForLanguage(translation.languageCode || lang, voices);
-                const audio = await generateAudio(
-                    translation.text,
-                    translation.languageCode || lang,
-                    voiceId,
-                    'high_quality'
-                );
-                return { [`${lang}_audio`]: audio };
-            } catch (error) {
-                console.error(`Audio generation failed for ${lang}:`, error.message);
+        // Generate audio for both languages in parallel
+        const audioPromises = languages.map(async (lang) => {
+            if (!translations[lang]) {
+                console.log(`No translation found for ${lang}, skipping...`);
                 return { [`${lang}_audio`]: null };
             }
-        }));
 
-        // Merge results
-        pairResults.forEach(result => {
-            Object.assign(audioResults, result);
+            console.log(`Generating audio for ${lang}...`);
+            const audioData = await generateAudio(translations[lang], lang);
+            
+            if (!audioData) {
+                console.error(`Failed to generate audio for ${lang}`);
+                return { [`${lang}_audio`]: null };
+            }
+
+            return { [`${lang}_audio`]: audioData };
         });
-    }
 
-    return audioResults;
+        // Wait for both audio generations to complete
+        const results = await Promise.all(audioPromises);
+        
+        // Combine results into a single object
+        return Object.assign({}, ...results);
+    } catch (error) {
+        console.error('Error processing language pair:', error);
+        return {};
+    }
 }
 
 /**
- * Save audio file with quality check
+ * Save audio file to disk
  */
-async function saveAudioFile(audioDataURI, outputPath) {
-    if (!audioDataURI) return false;
-    
+async function saveAudioFile(audioData, outputPath) {
     try {
-        const audioBuffer = Buffer.from(audioDataURI.split(',')[1], 'base64');
-        
-        // Verify audio file size
-        if (audioBuffer.length < 100) {
-            throw new Error('Generated audio file is too small, might be corrupted');
+        if (!audioData) {
+            throw new Error('No audio data to save');
         }
 
-        await fs.writeFile(outputPath, audioBuffer);
+        // Ensure directory exists
+        await fs.mkdir(path.dirname(outputPath), { recursive: true });
         
-        // Verify file was written
-        const stats = await fs.stat(outputPath);
-        if (stats.size !== audioBuffer.length) {
-            throw new Error('File size mismatch after saving');
-        }
-
+        await fs.writeFile(outputPath, audioData);
+        console.log('✓ Saved audio file:', outputPath);
         return true;
     } catch (error) {
         console.error('Error saving audio file:', error);
@@ -283,19 +197,12 @@ async function saveAudioFile(audioDataURI, outputPath) {
     }
 }
 
-// Initialize voices when imported
-(async () => {
-    try {
-        await getAvailableVoices();
-    } catch (error) {
-        console.error('Failed to initialize voices:', error);
+// Validate API key on startup
+validateApiKey().then(isValid => {
+    if (!isValid) {
+        console.error('Failed to validate Eleven Labs API key');
+        process.exit(1);
     }
-})();
+});
 
-export { 
-    processLanguagesInPairs, 
-    generateAudio, 
-    saveAudioFile,
-    VOICE_SETTINGS,
-    findBestVoiceForLanguage
-}; 
+export { generateAudio, processLanguagesInPairs, saveAudioFile }; 
