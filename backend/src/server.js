@@ -6,6 +6,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import { extractAudio } from './audioExtractor.js';
 import { setupTranscriptionWatcher, getTranscriptionStatus } from './transcriptionHandler.js';
+import { setupTranslationWatcher, getTranslationStatus } from './translationIntegrator.js';
 
 dotenv.config();
 
@@ -102,6 +103,17 @@ async function startTranscriptionWatcher(videoId) {
     const watcher = await setupTranscriptionWatcher(videoId);
     activeWatchers.set(videoId, watcher);
   }
+}
+
+// Store active translation watchers
+const activeTranslationWatchers = new Map();
+
+// Function to start translation watcher for a video
+async function startTranslationWatcher(videoId) {
+    if (!activeTranslationWatchers.has(videoId)) {
+        const watcher = await setupTranslationWatcher(videoId);
+        activeTranslationWatchers.set(videoId, watcher);
+    }
 }
 
 // Validate YouTube URL and get video information
@@ -216,6 +228,11 @@ app.post('/api/validate-youtube', async (req, res) => {
       if (!checkOnly) {
         startTranscriptionWatcher(videoId).catch(error => {
           console.error('Error starting transcription watcher:', error);
+        });
+        
+        // Start translation watcher after transcription watcher
+        startTranslationWatcher(videoId).catch(error => {
+          console.error('Error starting translation watcher:', error);
         });
       }
 
@@ -383,6 +400,21 @@ app.get('/api/transcription-status/:videoId', async (req, res) => {
       details: error.message
     });
   }
+});
+
+// Add endpoint to check translation status
+app.get('/api/translation-status/:videoId', async (req, res) => {
+    try {
+        const { videoId } = req.params;
+        const status = await getTranslationStatus(videoId);
+        res.json(status);
+    } catch (error) {
+        console.error('Error getting translation status:', error);
+        res.status(500).json({ 
+            error: 'Failed to get translation status',
+            details: error.message
+        });
+    }
 });
 
 app.listen(PORT, () => {
