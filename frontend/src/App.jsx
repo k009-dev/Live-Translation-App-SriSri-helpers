@@ -434,6 +434,22 @@ function StreamingAudioPlayer({ videoId, language }) {
     handlePlayStateChange();
   }, [isPlaying]);
 
+  // Add volume effect after the play state effect
+  useEffect(() => {
+    if (audioRef.current) {
+      audioRef.current.volume = volume;
+    }
+  }, [volume]);
+
+  // Update volume input handler to be more responsive
+  const handleVolumeChange = (e) => {
+    const newVolume = parseFloat(e.target.value);
+    setVolume(newVolume);
+    if (audioRef.current) {
+      audioRef.current.volume = newVolume;
+    }
+  };
+
   return (
     <div className="flex flex-col items-center space-y-4 p-4">
       {error ? (
@@ -485,7 +501,7 @@ function StreamingAudioPlayer({ videoId, language }) {
                 max="1"
                 step="0.1"
                 value={volume}
-                onChange={(e) => setVolume(parseFloat(e.target.value))}
+                onChange={handleVolumeChange}
                 className="w-24"
               />
               <span className="text-sm text-gray-600">
