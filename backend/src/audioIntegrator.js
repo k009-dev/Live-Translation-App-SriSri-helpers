@@ -25,6 +25,15 @@ async function ensureAudioDirectories(videoId) {
             console.log('✓ Created directory for', lang);
         }
 
+        // Also ensure the ExtractedAudio directories exist
+        const extractedAudioDir = path.join(baseDir, 'temp_files', videoId, 'ExtractedAudio');
+        const finalExtractedDir = path.join(extractedAudioDir, 'FinalExtracted');
+        const preprocessingDir = path.join(extractedAudioDir, 'PreProcessing');
+
+        await fs.mkdir(finalExtractedDir, { recursive: true });
+        await fs.mkdir(preprocessingDir, { recursive: true });
+        console.log('✓ Created ExtractedAudio directories');
+
         return audioDir;
     } catch (error) {
         console.error('Error creating audio directories:', error);
@@ -52,17 +61,51 @@ async function getAudioStatus(videoId) {
         
         for (const lang of languages) {
             const langDir = path.join(audioDir, lang);
-            const audioFiles = await fs.readdir(langDir)
-                .then(files => files.filter(f => f.endsWith('.wav')))
-                .catch(() => []);
+            console.log(`📂 Checking audio files for ${lang} in ${langDir}`);
             
-            languageStatus[lang] = {
-                filesCount: audioFiles.length,
-                progress: translationFiles.length ? (audioFiles.length / translationFiles.length) * 100 : 0
-            };
+            try {
+                const files = await fs.readdir(langDir);
+                console.log(`📁 Found files in ${lang} directory:`, files);
+                
+                // Get both WAV and MP3 files
+                const wavFiles = files.filter(f => f.endsWith('.wav'));
+                const mp3Files = files.filter(f => f.endsWith('.mp3'));
+                
+                console.log(`📊 ${lang} status:`, {
+                    wavFiles,
+                    mp3Files,
+                    totalWav: wavFiles.length,
+                    totalMp3: mp3Files.length
+                });
+
+                // Sort files by fragment number
+                const sortedMp3Files = mp3Files.sort((a, b) => {
+                    const numA = parseInt(a.match(/fragment-(\d+)\.mp3/)?.[1] || '0');
+                    const numB = parseInt(b.match(/fragment-(\d+)\.mp3/)?.[1] || '0');
+                    return numA - numB;
+                });
+                
+                languageStatus[lang] = {
+                    filesCount: mp3Files.length,
+                    progress: translationFiles.length ? (mp3Files.length / translationFiles.length) * 100 : 0,
+                    files: sortedMp3Files,
+                    wavFiles: wavFiles,
+                    mp3Files: mp3Files
+                };
+            } catch (error) {
+                console.error(`❌ Error reading directory for ${lang}:`, error);
+                languageStatus[lang] = {
+                    filesCount: 0,
+                    progress: 0,
+                    files: [],
+                    wavFiles: [],
+                    mp3Files: [],
+                    error: error.message
+                };
+            }
         }
 
-        return {
+        const status = {
             totalTranslations: translationFiles.length,
             processedAudioFiles: Object.values(languageStatus)[0]?.filesCount || 0,
             overallProgress: translationFiles.length ? 
@@ -71,7 +114,11 @@ async function getAudioStatus(videoId) {
             isComplete: translationFiles.length > 0 && 
                 Object.values(languageStatus).every(s => s.filesCount === translationFiles.length)
         };
+
+        console.log('📊 Overall audio status:', status);
+        return status;
     } catch (error) {
+        console.error('❌ Error getting audio status:', error);
         return {
             totalTranslations: 0,
             processedAudioFiles: 0,

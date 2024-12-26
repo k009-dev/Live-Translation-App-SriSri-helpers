@@ -9,6 +9,12 @@ import { setupTranscriptionWatcher, getTranscriptionStatus } from './transcripti
 import { setupTranslationWatcher, getTranslationStatus } from './translationIntegrator.js';
 import { setupAudioWatcher, getAudioStatus } from './audioIntegrator.js';
 import AudioSyncManager from './audioSyncManager.js';
+import { createReadStream } from 'fs';
+import { stat } from 'fs/promises';
+import { promisify } from 'util';
+import { WebSocket, WebSocketServer } from 'ws';
+import { createServer } from 'http';
+import { existsSync, readdirSync } from 'fs';
 
 dotenv.config();
 
@@ -144,6 +150,25 @@ async function startAudioSyncManager(videoId) {
     
     // Start the sync manager
     await syncManager.start();
+}
+
+// Add this function near the top with other utility functions
+async function ensureAudioDirectories(videoId) {
+  const baseDir = path.join(process.cwd(), 'temp_files', videoId);
+  const dirs = [
+    path.join(baseDir, 'FinalTranslatedAudio'),
+    path.join(baseDir, 'FinalTranslatedAudio', 'Hindi'),
+    path.join(baseDir, 'FinalTranslatedAudio', 'Sanskrit'),
+    path.join(baseDir, 'FinalTranslatedAudio', 'Kannada')
+  ];
+
+  for (const dir of dirs) {
+    try {
+      await fs.access(dir);
+    } catch {
+      await fs.mkdir(dir, { recursive: true });
+    }
+  }
 }
 
 // Validate YouTube URL and get video information
@@ -456,6 +481,15 @@ app.get('/api/translation-status/:videoId', async (req, res) => {
 app.get('/api/audio-status/:videoId', async (req, res) => {
     try {
         const { videoId } = req.params;
+        
+        // Ensure directories exist
+        try {
+            await ensureAudioDirectories(videoId);
+        } catch (error) {
+            console.error('Error ensuring directories exist:', error);
+            // Continue even if directory creation fails
+        }
+        
         const status = await getAudioStatus(videoId);
         res.json(status);
     } catch (error) {
@@ -493,6 +527,182 @@ activeTranslationWatchers.forEach(async (watcher, videoId) => {
     });
 });
 
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+// Create HTTP server
+const server = createServer(app);
+const wss = new WebSocketServer({ server });
+
+// Keep track of connected clients
+const clients = new Set();
+
+// WebSocket connection handler
+wss.on('connection', (ws) => {
+  clients.add(ws);
+  
+  ws.on('close', () => {
+    clients.delete(ws);
+  });
+});
+
+// Function to broadcast new fragment to all clients
+function broadcastNewFragment(videoId, language, fragmentNumber) {
+  const message = JSON.stringify({
+    type: 'newFragment',
+    videoId,
+    language,
+    fragment: fragmentNumber
+  });
+  
+  clients.forEach(client => {
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(message);
+    }
+  });
+}
+
+// Remove duplicate endpoints and keep only these two endpoints
+app.get('/api/audio/:videoId/:language/fragments', async (req, res) => {
+  const { videoId, language } = req.params;
+  const languageDir = path.join(BASE_TEMP_DIR, videoId, 'FinalTranslatedAudio', language);
+  
+  try {
+    console.log(`📂 Checking fragments in ${languageDir}`);
+    
+    // First ensure the directory exists
+    await ensureAudioDirectories(videoId);
+    
+    // Check if directory exists
+    const dirExists = await fs.access(languageDir)
+      .then(() => true)
+      .catch(() => false);
+    
+    if (!dirExists) {
+      console.log(`❌ Directory not found: ${languageDir}`);
+      return res.json({ 
+        files: [],
+        directory: languageDir,
+        totalFiles: 0,
+        audioFiles: 0
+      });
+    }
+
+    // Read directory contents
+    const allFiles = await fs.readdir(languageDir);
+    console.log(`📁 All files in directory:`, allFiles);
+    
+    // Filter and sort MP3 files only
+    const audioFiles = allFiles
+      .filter(file => file.endsWith('.mp3'))
+      .sort((a, b) => {
+        const numA = parseInt(a.match(/\d+/)?.[0] || '0');
+        const numB = parseInt(b.match(/\d+/)?.[0] || '0');
+        return numA - numB;
+      });
+
+    console.log(`✅ Found ${audioFiles.length} MP3 fragments:`, audioFiles);
+    
+    res.json({
+      files: audioFiles,
+      directory: languageDir,
+      totalFiles: allFiles.length,
+      audioFiles: audioFiles.length
+    });
+  } catch (error) {
+    console.error(`❌ Error getting fragments for ${language}:`, error);
+    res.status(500).json({ 
+      error: 'Failed to get fragments',
+      details: error.message,
+      path: languageDir
+    });
+  }
+});
+
+app.get('/api/audio/:videoId/:language/:filename', async (req, res) => {
+  let stream;
+  
+  try {
+    const { videoId, language, filename } = req.params;
+    const audioPath = path.join(BASE_TEMP_DIR, videoId, 'FinalTranslatedAudio', language, filename);
+    
+    console.log('🎵 Audio request received:', {
+      videoId,
+      language,
+      filename,
+      path: audioPath
+    });
+
+    // Check if file exists
+    try {
+      await fs.access(audioPath);
+      console.log('✅ File exists:', audioPath);
+    } catch (error) {
+      console.error('❌ File not found:', audioPath);
+      return res.status(404).json({ error: 'Audio file not found' });
+    }
+
+    // Get file stats
+    const stats = await stat(audioPath);
+    if (!stats.isFile() || stats.size === 0) {
+      console.error('❌ Invalid file:', audioPath);
+      return res.status(404).json({ error: 'Invalid audio file' });
+    }
+
+    // Set appropriate headers
+    const contentType = filename.endsWith('.mp3') ? 'audio/mpeg' : 'audio/wav';
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Content-Length', stats.size);
+    res.setHeader('Accept-Ranges', 'bytes');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+
+    // Handle range requests
+    const range = req.headers.range;
+    if (range) {
+      const parts = range.replace(/bytes=/, "").split("-");
+      const start = parseInt(parts[0], 10);
+      const end = parts[1] ? parseInt(parts[1], 10) : stats.size - 1;
+      const chunksize = (end - start) + 1;
+      
+      res.setHeader('Content-Range', `bytes ${start}-${end}/${stats.size}`);
+      res.setHeader('Content-Length', chunksize);
+      res.status(206);
+      
+      stream = createReadStream(audioPath, { start, end });
+    } else {
+      stream = createReadStream(audioPath);
+    }
+
+    // Handle stream events
+    stream.on('error', (error) => {
+      console.error('❌ Stream error:', error);
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'Error streaming audio file' });
+      }
+    });
+
+    stream.on('open', () => console.log('✅ Stream opened for:', filename));
+    stream.on('end', () => console.log('✅ Stream ended for:', filename));
+
+    // Pipe the stream to response
+    stream.pipe(res);
+
+  } catch (error) {
+    console.error('❌ Error serving audio file:', error);
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'Failed to serve audio file' });
+    }
+    
+    // Clean up stream if it exists
+    if (stream) {
+      stream.destroy();
+    }
+  }
+});
+
+// Add status endpoint
+app.get('/api/status', (req, res) => {
+  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+server.listen(PORT, () => {
+  console.log(`Server is running on port ${PORT}`);
 }); 

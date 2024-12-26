@@ -1,6 +1,10 @@
 import fs from 'fs/promises';
 import path from 'path';
 import { generateAudio, processLanguagesInPairs, saveAudioFile } from './audioHandler.js';
+import { exec } from 'child_process';
+import { promisify } from 'util';
+
+const execAsync = promisify(exec);
 
 class AudioSyncManager {
     constructor(videoId) {
@@ -170,6 +174,29 @@ class AudioSyncManager {
     }
 
     /**
+     * Convert WAV to MP3
+     */
+    async convertToMp3(wavPath) {
+        try {
+            const mp3Path = wavPath.replace('.wav', '.mp3');
+            console.log(`🔄 Converting ${wavPath} to MP3...`);
+            
+            const command = `ffmpeg -i "${wavPath}" -codec:a libmp3lame -qscale:a 2 "${mp3Path}" -y`;
+            const { stdout, stderr } = await execAsync(command);
+            
+            if (stderr) {
+                console.log('⚠️ FFmpeg stderr:', stderr);
+            }
+            
+            console.log(`✅ Successfully converted to MP3: ${mp3Path}`);
+            return mp3Path;
+        } catch (error) {
+            console.error('❌ Error converting to MP3:', error);
+            throw error;
+        }
+    }
+
+    /**
      * Process a specific fragment for all languages
      */
     async processFragment(fragmentNum) {
@@ -211,55 +238,52 @@ class AudioSyncManager {
                 try {
                     // Check if file already exists
                     const audioPath = path.join(this.audioDir, lang, `fragment-${fragmentNum}.wav`);
+                    const mp3Path = audioPath.replace('.wav', '.mp3');
+
+                    // Check if MP3 already exists
                     try {
-                        await fs.access(audioPath);
-                        console.log(`✅ Already have audio for ${lang} fragment ${fragmentNum}`);
+                        await fs.access(mp3Path);
+                        console.log(`✅ MP3 already exists for ${lang} fragment ${fragmentNum}`);
                         break; // Move to next language
                     } catch {
-                        // File doesn't exist, proceed with generation
-                    }
-
-                    console.log(`🎵 Generating audio for ${lang} fragment ${fragmentNum}`);
-                    const results = await processLanguagesInPairs(translations, [lang]);
-                    const audioData = results[`${lang}_audio`];
-                    
-                    if (audioData) {
-                        const success = await saveAudioFile(audioData, audioPath);
-                        if (success) {
-                            console.log(`✅ Saved audio for ${lang} fragment ${fragmentNum}`);
-                            break; // Success! Move to next language
+                        // MP3 doesn't exist, check for WAV
+                        try {
+                            await fs.access(audioPath);
+                            console.log(`✅ Found WAV file for ${lang} fragment ${fragmentNum}, converting to MP3...`);
+                            await this.convertToMp3(audioPath);
+                            // Delete WAV file after successful conversion
+                            await fs.unlink(audioPath);
+                            console.log(`🗑️ Deleted WAV file: ${audioPath}`);
+                            break; // Move to next language
+                        } catch {
+                            // Neither WAV nor MP3 exists, generate new audio
+                            console.log(`⚙️ Generating new audio for ${lang} fragment ${fragmentNum}`);
+                            const audioData = await generateAudio(translations[lang], lang);
+                            if (!audioData) {
+                                throw new Error('Failed to generate audio');
+                            }
+                            
+                            // Save as WAV first
+                            await saveAudioFile(audioData, audioPath);
+                            
+                            // Convert to MP3
+                            await this.convertToMp3(audioPath);
+                            
+                            // Delete WAV file after successful conversion
+                            await fs.unlink(audioPath);
+                            console.log(`🗑️ Deleted WAV file: ${audioPath}`);
+                            break; // Move to next language
                         }
                     }
-                    
-                    throw new Error('Audio generation failed');
                 } catch (error) {
-                    console.error(`❌ Error processing ${lang} (retrying in 2s):`, error);
-                    await new Promise(resolve => setTimeout(resolve, 2000));
-                    // Loop continues automatically
+                    console.error(`❌ Error processing ${lang} fragment ${fragmentNum}:`, error);
+                    await new Promise(resolve => setTimeout(resolve, 5000)); // Wait 5 seconds before retrying
+                    continue; // Try again
                 }
             }
         }
 
-        // Verify all languages have audio for this fragment
-        let allComplete = true;
-        for (const lang of this.languages) {
-            const audioPath = path.join(this.audioDir, lang, `fragment-${fragmentNum}.wav`);
-            try {
-                await fs.access(audioPath);
-                console.log(`✓ Verified ${lang} fragment ${fragmentNum} exists`);
-            } catch {
-                console.error(`❌ Missing audio for ${lang} fragment ${fragmentNum}`);
-                allComplete = false;
-            }
-        }
-
-        if (allComplete) {
-            console.log(`\n🎉 Successfully completed fragment ${fragmentNum} for all languages!`);
-            return true;
-        } else {
-            console.error(`❌ Fragment ${fragmentNum} verification failed, will retry`);
-            return false;
-        }
+        return true;
     }
 
     /**
@@ -284,7 +308,7 @@ class AudioSyncManager {
                 if (await this.hasTranslations(currentFragment)) {
                     let success = false;
                     while (!success) {
-                        console.log(`\n🎯 Processing fragment ${currentFragment}`);
+                        console.log(`\n Processing fragment ${currentFragment}`);
                         success = await this.processFragment(currentFragment);
                         
                         if (!success) {

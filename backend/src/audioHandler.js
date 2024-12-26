@@ -55,33 +55,51 @@ async function getVoices() {
 }
 
 /**
- * Validate API key
+ * Validate API key with retry logic
  */
-async function validateApiKey() {
-    try {
-        const response = await fetch(`${API_URL}/user/subscription`, {
-            headers: {
-                'xi-api-key': ELEVEN_LABS_API_KEY
+async function validateApiKey(retries = 3, delay = 2000) {
+    for (let attempt = 1; attempt <= retries; attempt++) {
+        try {
+            console.log(`Attempt ${attempt} to validate API key...`);
+            
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 5000); // 5 second timeout
+            
+            const response = await fetch(`${API_URL}/user/subscription`, {
+                headers: {
+                    'xi-api-key': ELEVEN_LABS_API_KEY
+                },
+                signal: controller.signal
+            });
+            
+            clearTimeout(timeoutId);
+
+            if (!response.ok) {
+                throw new Error(`Invalid API key: ${response.status} ${response.statusText}`);
             }
-        });
 
-        if (!response.ok) {
-            throw new Error(`Invalid API key: ${response.status} ${response.statusText}`);
+            const data = await response.json();
+            console.log('API key validated successfully. Character quota:', data.character_count, '/', data.character_limit);
+            return true;
+        } catch (error) {
+            console.error(`API key validation attempt ${attempt} failed:`, error);
+            
+            if (attempt === retries) {
+                console.error('All validation attempts failed');
+                return false;
+            }
+            
+            console.log(`Waiting ${delay}ms before next attempt...`);
+            await new Promise(resolve => setTimeout(resolve, delay));
         }
-
-        const data = await response.json();
-        console.log('API key validated successfully. Character quota:', data.character_count, '/', data.character_limit);
-        return true;
-    } catch (error) {
-        console.error('API key validation failed:', error);
-        return false;
     }
+    return false;
 }
 
 /**
- * Generate audio for a single text using ElevenLabs API
+ * Generate audio for a single text using ElevenLabs API with retry logic
  */
-async function generateAudio(text, language) {
+async function generateAudio(text, language, retries = 3, delay = 2000) {
     try {
         if (!text || !language) {
             console.error('Missing required parameters for audio generation');
@@ -108,32 +126,53 @@ async function generateAudio(text, language) {
 
         console.log(`Using voice ID ${voiceId} for ${language}`);
         
-        const response = await fetch(`${API_URL}/text-to-speech/${voiceId}`, {
-            method: 'POST',
-            headers: {
-                'Accept': 'audio/mpeg',
-                'Content-Type': 'application/json',
-                'xi-api-key': ELEVEN_LABS_API_KEY
-            },
-            body: JSON.stringify({
-                text: text,
-                model_id: 'eleven_multilingual_v2',
-                voice_settings: {
-                    stability: 0.5,
-                    similarity_boost: 0.75,
-                    style: 0.5,
-                    use_speaker_boost: true
+        for (let attempt = 1; attempt <= retries; attempt++) {
+            try {
+                console.log(`Attempt ${attempt} to generate audio...`);
+                
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout for audio generation
+                
+                const response = await fetch(`${API_URL}/text-to-speech/${voiceId}`, {
+                    method: 'POST',
+                    headers: {
+                        'Accept': 'audio/mpeg',
+                        'Content-Type': 'application/json',
+                        'xi-api-key': ELEVEN_LABS_API_KEY
+                    },
+                    body: JSON.stringify({
+                        text: text,
+                        model_id: 'eleven_multilingual_v2',
+                        voice_settings: {
+                            stability: 0.5,
+                            similarity_boost: 0.75,
+                            style: 0.5,
+                            use_speaker_boost: true
+                        }
+                    }),
+                    signal: controller.signal
+                });
+                
+                clearTimeout(timeoutId);
+
+                if (!response.ok) {
+                    const errorText = await response.text();
+                    throw new Error(`ElevenLabs API error: ${response.status} ${response.statusText}\n${errorText}`);
                 }
-            })
-        });
 
-        if (!response.ok) {
-            const errorText = await response.text();
-            throw new Error(`ElevenLabs API error: ${response.status} ${response.statusText}\n${errorText}`);
+                const audioBuffer = await response.arrayBuffer();
+                return Buffer.from(audioBuffer);
+            } catch (error) {
+                console.error(`Audio generation attempt ${attempt} failed:`, error);
+                
+                if (attempt === retries) {
+                    throw error;
+                }
+                
+                console.log(`Waiting ${delay}ms before next attempt...`);
+                await new Promise(resolve => setTimeout(resolve, delay));
+            }
         }
-
-        const audioBuffer = await response.arrayBuffer();
-        return Buffer.from(audioBuffer);
     } catch (error) {
         console.error(`Error generating audio for ${language}:`, error);
         return null;

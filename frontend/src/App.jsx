@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import axios from 'axios';
 import { Toaster, toast } from 'react-hot-toast';
 import { BrowserRouter as Router, Routes, Route, useNavigate } from 'react-router-dom';
@@ -122,14 +122,323 @@ function ExtractionStatus({ status }) {
   );
 }
 
+// Add this new component for streaming audio playback
+function StreamingAudioPlayer({ videoId, language }) {
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
+  const [currentFragment, setCurrentFragment] = useState(0);
+  const [fragments, setFragments] = useState([]);
+  const [error, setError] = useState(null);
+  const [volume, setVolume] = useState(1.0);
+  const [currentTime, setCurrentTime] = useState(0);
+
+  const audioRef = useRef(null);
+  const isUnmountingRef = useRef(false);
+
+  const checkBackendAvailability = async () => {
+    try {
+      console.log('🔍 Checking backend availability...');
+      const response = await fetch('http://localhost:3001/api/status');
+      if (!response.ok) {
+        throw new Error(`Backend returned status ${response.status}`);
+      }
+      console.log('✅ Backend is available');
+      return true;
+    } catch (error) {
+      console.error('❌ Backend is not available:', error);
+      setError('Backend server is not available. Please ensure it is running.');
+      return false;
+    }
+  };
+
+  const setupAudioElement = () => {
+    if (!audioRef.current) {
+      audioRef.current = new Audio();
+      audioRef.current.volume = volume;
+
+      audioRef.current.addEventListener('timeupdate', () => {
+        setCurrentTime(audioRef.current.currentTime);
+        console.log(`⏱️ Playback progress: ${audioRef.current.currentTime.toFixed(2)}/${audioRef.current.duration.toFixed(2)} seconds`);
+      });
+
+      audioRef.current.addEventListener('ended', () => {
+        console.log(`✅ Fragment ${currentFragment} finished`);
+        if (currentFragment < fragments.length - 1) {
+          setCurrentFragment(prev => prev + 1);
+        } else {
+          setIsPlaying(false);
+        }
+      });
+
+      audioRef.current.addEventListener('error', (e) => {
+        console.error('❌ Audio error:', e);
+        setError('Failed to play audio');
+      });
+    }
+  };
+
+  const loadAudio = async () => {
+    if (!fragments[currentFragment]) return;
+    
+    const fragmentName = fragments[currentFragment];
+    const url = `http://localhost:3001/api/audio/${videoId}/${language}/${fragmentName}`;
+    console.log(`🔗 Loading audio from URL: ${url}`);
+    
+    audioRef.current.src = url;
+    await audioRef.current.load();
+  };
+
+  const togglePlay = async () => {
+    try {
+      console.log('🎵 Toggle play clicked');
+      console.log('Current state:', { 
+        isPlaying, 
+        currentFragment, 
+        fragmentsCount: fragments.length,
+        currentTime: audioRef.current?.currentTime 
+      });
+
+      if (!await checkBackendAvailability()) {
+        throw new Error('Backend is not available');
+      }
+
+      if (isPlaying) {
+        console.log('⏸️ Pausing playback');
+        await audioRef.current?.pause();
+        setIsPlaying(false);
+      } else {
+        console.log('▶️ Starting playback');
+        setupAudioElement();
+        if (!audioRef.current.src) {
+          await loadAudio();
+        }
+        await audioRef.current.play();
+        setIsPlaying(true);
+      }
+    } catch (error) {
+      console.error('❌ Error toggling playback:', error);
+      setError('Failed to toggle playback: ' + error.message);
+      setIsPlaying(false);
+    }
+  };
+
+  // Effect for loading fragments
+  useEffect(() => {
+    const checkFragments = async () => {
+      if (isUnmountingRef.current) return;
+      
+      try {
+        setIsLoading(true);
+        console.log(`��� Checking fragments for ${language}...`);
+        const response = await fetch(`http://localhost:3001/api/audio/${videoId}/${language}/fragments`);
+        
+        if (!response.ok) {
+          throw new Error(`HTTP error! status: ${response.status}`);
+        }
+
+        const data = await response.json();
+        console.log(`📁 Response for ${language}:`, data);
+        
+        if (data.files && Array.isArray(data.files)) {
+          const newFragments = data.files.filter(f => f.endsWith('.mp3'));
+          console.log(`📥 Found ${newFragments.length} MP3 fragments for ${language}:`, newFragments);
+          
+          if (newFragments.length > fragments.length) {
+            console.log(`📥 Setting ${newFragments.length} fragments for ${language}`);
+            setFragments(newFragments);
+          }
+        }
+      } catch (error) {
+        console.error('❌ Error checking fragments:', error);
+        setError(error.message);
+      } finally {
+        setIsLoading(false);
+      }
+    };
+
+    checkFragments();
+    const interval = setInterval(checkFragments, 2000);
+
+    return () => {
+      console.log('🧹 Cleaning up audio player...');
+      isUnmountingRef.current = true;
+      clearInterval(interval);
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current.src = '';
+        audioRef.current = null;
+      }
+    };
+  }, [videoId, language]);
+
+  // Effect for handling fragment changes
+  useEffect(() => {
+    if (isPlaying) {
+      loadAudio().then(() => {
+        audioRef.current?.play();
+      }).catch(error => {
+        console.error('Failed to load or play audio:', error);
+        setError('Failed to play audio');
+        setIsPlaying(false);
+      });
+    }
+  }, [currentFragment]);
+
+  // Effect for volume changes
+  useEffect(() => {
+    if (audioRef.current) {
+      audioRef.current.volume = volume;
+    }
+  }, [volume]);
+
+  return (
+    <div className="flex flex-col items-center space-y-4 p-4">
+      {error ? (
+        <div className="flex items-center space-x-4">
+          <div className="text-red-500">{error}</div>
+          <button
+            onClick={() => setError(null)}
+            className="p-2 rounded-full bg-red-500 text-white hover:bg-red-600"
+          >
+            Retry
+          </button>
+        </div>
+      ) : (
+        <>
+          <div className="flex items-center space-x-4">
+            <button
+              onClick={async () => {
+                try {
+                  await togglePlay();
+                } catch (error) {
+                  console.error('Error toggling play:', error);
+                  setError(error.message);
+                }
+              }}
+              disabled={isLoading || fragments.length === 0}
+              className={`p-4 rounded-full ${
+                isLoading || fragments.length === 0
+                  ? 'bg-gray-300 cursor-not-allowed'
+                  : isPlaying
+                  ? 'bg-red-500 hover:bg-red-600'
+                  : 'bg-green-500 hover:bg-green-600'
+              } text-white transition-colors`}
+            >
+              {isLoading ? (
+                <span className="animate-pulse">Loading...</span>
+              ) : isPlaying ? (
+                '⏸️ Pause'
+              ) : (
+                '▶️ Play'
+              )}
+            </button>
+            
+            <div className="text-sm text-gray-600">
+              Fragment: {currentFragment + 1}/{fragments.length || 0}
+            </div>
+
+            <div className="flex items-center space-x-2">
+              <label htmlFor="volume" className="text-sm text-gray-600">
+                Volume:
+              </label>
+              <input
+                id="volume"
+                type="range"
+                min="0"
+                max="1"
+                step="0.1"
+                value={volume}
+                onChange={(e) => setVolume(parseFloat(e.target.value))}
+                className="w-24"
+              />
+              <span className="text-sm text-gray-600">
+                {Math.round(volume * 100)}%
+              </span>
+            </div>
+          </div>
+
+          {fragments.length > 0 && (
+            <div className="w-full max-w-md">
+              <div className="text-sm text-gray-600 mb-2">
+                Available Fragments:
+              </div>
+              <div className="bg-gray-50 p-2 rounded max-h-40 overflow-y-auto">
+                {fragments.map((fragment, index) => (
+                  <div
+                    key={fragment}
+                    className={`py-1 px-2 rounded ${
+                      index === currentFragment
+                        ? 'bg-blue-100 text-blue-800'
+                        : index % 2 === 0
+                        ? 'bg-white'
+                        : 'bg-gray-50'
+                    }`}
+                  >
+                    {fragment}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+// Update AudioFilesStatus component
+function AudioFilesStatus({ status }) {
+  const videoId = window.location.pathname.split('/').pop();
+  if (!status?.audioStatus?.languageStatus) return null;
+
+  return (
+    <div className="mt-8">
+      <h2 className="text-2xl font-bold mb-4">Audio Files Status</h2>
+      <div className="space-y-6">
+        {Object.entries(status.audioStatus.languageStatus).map(([language, langStatus]) => (
+          <div key={language} className="bg-white rounded-lg shadow p-4">
+            <h3 className="text-xl font-semibold mb-3">{language}</h3>
+            <div className="space-y-4">
+              <StreamingAudioPlayer videoId={videoId} language={language} />
+              <div className="text-sm text-gray-600">
+                Available fragments: {langStatus.filesCount || 0}
+              </div>
+              <div className="w-full bg-gray-200 rounded-full h-2">
+                <div 
+                  className="bg-blue-600 h-2 rounded-full transition-all duration-300" 
+                  style={{ width: `${langStatus.progress || 0}%` }}
+                ></div>
+              </div>
+              <div className="text-sm text-gray-600">
+                Progress: {(langStatus.progress || 0).toFixed(1)}%
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+      <div className="mt-4 bg-white rounded-lg shadow p-4">
+        <h3 className="text-lg font-semibold mb-2">Overall Progress</h3>
+        <div className="w-full bg-gray-200 rounded-full h-2">
+          <div 
+            className="bg-green-600 h-2 rounded-full transition-all duration-300" 
+            style={{ width: `${status.audioStatus.overallProgress || 0}%` }}
+          ></div>
+        </div>
+        <div className="text-sm text-gray-600 mt-1">
+          {(status.audioStatus.overallProgress || 0).toFixed(1)}%
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // VideoDetails component
 function VideoDetails() {
   const [videoInfo, setVideoInfo] = useState(null);
   const [extractionStatus, setExtractionStatus] = useState(null);
+  const videoId = window.location.pathname.split('/').pop();
 
   useEffect(() => {
-    // Get video ID from URL
-    const videoId = window.location.pathname.split('/').pop();
     if (videoId) {
       // Fetch video details
       axios.post('http://localhost:3001/api/validate-youtube', { 
@@ -146,51 +455,63 @@ function VideoDetails() {
 
       // Set up polling for extraction status
       const pollInterval = setInterval(() => {
-        axios.get(`http://localhost:3001/api/extraction-status/${videoId}`)
-          .then(response => {
-            console.log('Extraction status:', response.data);
-            setExtractionStatus(response.data);
+        Promise.all([
+          axios.get(`http://localhost:3001/api/extraction-status/${videoId}`),
+          axios.get(`http://localhost:3001/api/audio-status/${videoId}`)
+        ])
+          .then(([extractionRes, audioRes]) => {
+            console.log('Extraction status:', extractionRes.data);
+            console.log('Audio status:', audioRes.data);
+            setExtractionStatus({
+              ...extractionRes.data,
+              audioStatus: audioRes.data,
+              videoId
+            });
           })
           .catch(error => {
-            console.error('Error fetching extraction status:', error);
+            console.error('Error fetching status:', error);
           });
-      }, 2000); // Poll every 2 seconds
+      }, 2000);
 
-      // Cleanup interval on unmount
-      return () => clearInterval(pollInterval);
+      return () => {
+        clearInterval(pollInterval);
+      };
     }
-  }, []);
+  }, [videoId]);
 
   return (
     <div className="min-h-screen bg-gray-100 py-8 px-4">
       <div className="max-w-4xl mx-auto">
         {videoInfo ? (
-          <div className="bg-white rounded-lg shadow-lg p-6 text-black">
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              <div>
-                <img
-                  src={videoInfo.thumbnails?.maxres?.url || videoInfo.thumbnails?.high?.url}
-                  alt={videoInfo.title}
-                  className="w-full rounded-lg"
-                />
-              </div>
-              <div>
-                <h2 className="text-xl font-semibold mb-4">{videoInfo.title}</h2>
-                <div className="space-y-2">
-                  <p><span className="font-medium">Channel:</span> {videoInfo.channelTitle}</p>
-                  <p><span className="font-medium">Duration:</span> {formatDuration(videoInfo.duration)}</p>
-                  <p><span className="font-medium">Privacy:</span> {videoInfo.privacyStatus}</p>
-                  <p><span className="font-medium">Type:</span> {videoInfo.isLiveContent ? 'Live Content' : 'Regular Video'}</p>
+          <div className="space-y-6">
+            <div className="bg-white rounded-lg shadow-lg p-6">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div>
+                  <img
+                    src={videoInfo.thumbnails?.maxres?.url || videoInfo.thumbnails?.high?.url}
+                    alt={videoInfo.title}
+                    className="w-full rounded-lg"
+                  />
                 </div>
-                <div className="mt-4">
-                  <h3 className="font-medium mb-2">Description:</h3>
-                  <p className="text-sm text-gray-600 max-h-32 overflow-y-auto">
-                    {videoInfo.description || 'No description available'}
-                  </p>
+                <div>
+                  <h2 className="text-xl font-semibold mb-4">{videoInfo.title}</h2>
+                  <div className="space-y-2">
+                    <p><span className="font-medium">Channel:</span> {videoInfo.channelTitle}</p>
+                    <p><span className="font-medium">Duration:</span> {formatDuration(videoInfo.duration)}</p>
+                    <p><span className="font-medium">Privacy:</span> {videoInfo.privacyStatus}</p>
+                    <p><span className="font-medium">Type:</span> {videoInfo.isLiveContent ? 'Live Content' : 'Regular Video'}</p>
+                  </div>
+                  <div className="mt-4">
+                    <h3 className="font-medium mb-2">Description:</h3>
+                    <p className="text-sm text-gray-600 max-h-32 overflow-y-auto">
+                      {videoInfo.description || 'No description available'}
+                    </p>
+                  </div>
                 </div>
               </div>
             </div>
             <ExtractionStatus status={extractionStatus} />
+            <AudioFilesStatus status={extractionStatus} />
           </div>
         ) : (
           <div className="text-center">Loading video details...</div>
