@@ -11,8 +11,22 @@ class AudioSyncManager {
         this.currentFragment = 0;
         this.isProcessing = false;
         this.languages = [
-            'English', 'Hindi', 'Tamil', 'Telugu', 'Malayalam', 'Kannada',
-            'Marathi', 'Gujarati', 'Punjabi', 'Sanskrit', 'French', 'Spanish', 'Russian'
+            // Active languages
+            'Hindi',
+            'Sanskrit',
+            'Kannada',
+            
+            // Commented languages
+            // 'English',
+            // 'Tamil',
+            // 'Telugu',
+            // 'Malayalam',
+            // 'Marathi',
+            // 'Gujarati',
+            // 'Punjabi',
+            // 'French',
+            // 'Spanish',
+            // 'Russian'
         ];
     }
 
@@ -40,11 +54,56 @@ class AudioSyncManager {
      * Get the next fragment that needs processing
      */
     async findNextFragment() {
-        let fragment = this.currentFragment;
-        while (await this.isFragmentComplete(fragment)) {
+        // Start checking from fragment 0
+        let fragment = 0;
+        
+        // Keep checking each fragment in sequence
+        while (true) {
+            // Check if this fragment exists for all languages
+            let isComplete = true;
+            let hasAny = false;
+
+            for (const lang of this.languages) {
+                const audioPath = path.join(this.audioDir, lang, `fragment-${fragment}.wav`);
+                try {
+                    await fs.access(audioPath);
+                    hasAny = true;  // At least one language has this fragment
+                } catch {
+                    isComplete = false;  // Missing for at least one language
+                }
+            }
+
+            // If no language has this fragment and we've found files before,
+            // we've reached the end
+            if (!hasAny && fragment > 0) {
+                // Go back to the last incomplete fragment
+                while (fragment >= 0) {
+                    let prevComplete = true;
+                    for (const lang of this.languages) {
+                        const audioPath = path.join(this.audioDir, lang, `fragment-${fragment}.wav`);
+                        try {
+                            await fs.access(audioPath);
+                        } catch {
+                            prevComplete = false;
+                            break;
+                        }
+                    }
+                    if (!prevComplete) {
+                        return fragment;
+                    }
+                    fragment--;
+                }
+                return 0;  // If all previous are complete, start from 0
+            }
+
+            // If this fragment is not complete for all languages, this is the one to process
+            if (!isComplete) {
+                return fragment;
+            }
+
+            // Move to next fragment
             fragment++;
         }
-        return fragment;
     }
 
     /**
@@ -52,6 +111,45 @@ class AudioSyncManager {
      */
     async hasTranslations(fragmentNum) {
         try {
+            // First check if any language has audio for a higher fragment number
+            let maxFragment = -1;
+            for (const lang of this.languages) {
+                const langDir = path.join(this.audioDir, lang);
+                try {
+                    const files = await fs.readdir(langDir);
+                    for (const file of files) {
+                        const match = file.match(/fragment-(\d+)\.wav$/);
+                        if (match) {
+                            const num = parseInt(match[1]);
+                            maxFragment = Math.max(maxFragment, num);
+                        }
+                    }
+                } catch {
+                    // Directory might not exist yet
+                }
+            }
+
+            // If we're trying to process a fragment but have higher numbers,
+            // force processing of the current fragment first
+            if (maxFragment > fragmentNum) {
+                console.log(`Found fragment ${maxFragment} but need to process ${fragmentNum} first`);
+                // Check if translations exist for this fragment
+                for (const lang of this.languages) {
+                    const translationPath = path.join(
+                        this.translationsDir, 
+                        lang, 
+                        `fragment-${fragmentNum}.json`
+                    );
+                    try {
+                        await fs.access(translationPath);
+                    } catch {
+                        return false;
+                    }
+                }
+                return true;
+            }
+
+            // Normal translation check
             for (const lang of this.languages) {
                 const translationPath = path.join(
                     this.translationsDir, 
@@ -75,7 +173,7 @@ class AudioSyncManager {
      * Process a specific fragment for all languages
      */
     async processFragment(fragmentNum) {
-        console.log(`\n=== Processing fragment ${fragmentNum} for all languages ===`);
+        console.log(`\n🎯 Starting fragment ${fragmentNum} processing`);
         
         // Read all translations first
         const translations = {};
@@ -91,141 +189,76 @@ class AudioSyncManager {
                 const content = await fs.readFile(translationPath, 'utf-8');
                 const data = JSON.parse(content);
                 translations[lang] = data.translation.text;
-                console.log(`✓ Read translation for ${lang} fragment ${fragmentNum}`);
+                console.log(`📖 Read translation for ${lang} fragment ${fragmentNum}`);
             } catch (error) {
-                console.error(`Error reading translation for ${lang}:`, error);
+                console.error(`❌ Error reading translation for ${lang}:`, error);
                 allTranslationsRead = false;
                 break;
             }
         }
 
         if (!allTranslationsRead) {
-            console.error(`Failed to read all translations for fragment ${fragmentNum}`);
+            console.error(`❌ Failed to read all translations for fragment ${fragmentNum}`);
             return false;
         }
 
-        // Process languages until all are complete for this fragment
-        while (true) {
-            // Check which languages still need processing
-            const remainingLanguages = [];
-            for (const lang of this.languages) {
-                const audioPath = path.join(this.audioDir, lang, `fragment-${fragmentNum}.wav`);
+        // Process languages strictly in sequence
+        for (const lang of this.languages) {
+            console.log(`\n🔄 Processing ${lang} fragment ${fragmentNum}`);
+            
+            // Keep trying until we succeed for this language
+            while (true) {
                 try {
-                    await fs.access(audioPath);
-                    console.log(`✓ Already have audio for ${lang} fragment ${fragmentNum}`);
-                } catch {
-                    remainingLanguages.push(lang);
-                }
-            }
-
-            // If all languages are done, we're finished with this fragment
-            if (remainingLanguages.length === 0) {
-                console.log(`✓ All languages completed for fragment ${fragmentNum}`);
-                return true;
-            }
-
-            console.log(`\nRemaining languages for fragment ${fragmentNum}:`, remainingLanguages);
-
-            // Process remaining languages in pairs or single
-            if (remainingLanguages.length === 1) {
-                // Process single remaining language
-                const lang = remainingLanguages[0];
-                console.log(`\nProcessing final language: ${lang}`);
-                
-                let success = false;
-                let retryCount = 0;
-                const maxRetries = 3;
-
-                while (!success && retryCount < maxRetries) {
+                    // Check if file already exists
+                    const audioPath = path.join(this.audioDir, lang, `fragment-${fragmentNum}.wav`);
                     try {
-                        const results = await processLanguagesInPairs(translations, [lang]);
-                        const audioData = results[`${lang}_audio`];
-                        
-                        if (audioData) {
-                            const outputPath = path.join(
-                                this.audioDir,
-                                lang,
-                                `fragment-${fragmentNum}.wav`
-                            );
-                            success = await saveAudioFile(audioData, outputPath);
-                            if (success) {
-                                console.log(`✓ Saved audio for ${lang} fragment ${fragmentNum}`);
-                                break;
-                            }
+                        await fs.access(audioPath);
+                        console.log(`✅ Already have audio for ${lang} fragment ${fragmentNum}`);
+                        break; // Move to next language
+                    } catch {
+                        // File doesn't exist, proceed with generation
+                    }
+
+                    console.log(`🎵 Generating audio for ${lang} fragment ${fragmentNum}`);
+                    const results = await processLanguagesInPairs(translations, [lang]);
+                    const audioData = results[`${lang}_audio`];
+                    
+                    if (audioData) {
+                        const success = await saveAudioFile(audioData, audioPath);
+                        if (success) {
+                            console.log(`✅ Saved audio for ${lang} fragment ${fragmentNum}`);
+                            break; // Success! Move to next language
                         }
-                    } catch (error) {
-                        console.error(`Error processing ${lang} (attempt ${retryCount + 1}):`, error);
                     }
-
-                    retryCount++;
-                    if (retryCount < maxRetries) {
-                        console.log(`Retrying ${lang} in 5 seconds...`);
-                        await new Promise(resolve => setTimeout(resolve, 5000));
-                    }
-                }
-
-                if (!success) {
-                    console.error(`Failed to process ${lang} after ${maxRetries} attempts`);
-                    return false;
-                }
-            } else {
-                // Process first pair
-                const pair = [remainingLanguages[0], remainingLanguages[1]];
-                console.log(`\nProcessing pair: ${pair.join(', ')}`);
-                
-                let success = false;
-                let retryCount = 0;
-                const maxRetries = 3;
-
-                while (!success && retryCount < maxRetries) {
-                    try {
-                        const results = await processLanguagesInPairs(translations, pair);
-                        let pairSuccess = true;
-
-                        // Save results
-                        for (const lang of pair) {
-                            const audioData = results[`${lang}_audio`];
-                            if (audioData) {
-                                const outputPath = path.join(
-                                    this.audioDir,
-                                    lang,
-                                    `fragment-${fragmentNum}.wav`
-                                );
-                                const saved = await saveAudioFile(audioData, outputPath);
-                                if (!saved) {
-                                    pairSuccess = false;
-                                    break;
-                                }
-                                console.log(`✓ Saved audio for ${lang} fragment ${fragmentNum}`);
-                            } else {
-                                pairSuccess = false;
-                                break;
-                            }
-                        }
-
-                        if (pairSuccess) {
-                            success = true;
-                            break;
-                        }
-                    } catch (error) {
-                        console.error(`Error processing pair ${pair.join(', ')} (attempt ${retryCount + 1}):`, error);
-                    }
-
-                    retryCount++;
-                    if (retryCount < maxRetries) {
-                        console.log(`Retrying pair ${pair.join(', ')} in 5 seconds...`);
-                        await new Promise(resolve => setTimeout(resolve, 5000));
-                    }
-                }
-
-                if (!success) {
-                    console.error(`Failed to process pair ${pair.join(', ')} after ${maxRetries} attempts`);
-                    return false;
+                    
+                    throw new Error('Audio generation failed');
+                } catch (error) {
+                    console.error(`❌ Error processing ${lang} (retrying in 2s):`, error);
+                    await new Promise(resolve => setTimeout(resolve, 2000));
+                    // Loop continues automatically
                 }
             }
+        }
 
-            // Small delay before checking remaining languages again
-            await new Promise(resolve => setTimeout(resolve, 1000));
+        // Verify all languages have audio for this fragment
+        let allComplete = true;
+        for (const lang of this.languages) {
+            const audioPath = path.join(this.audioDir, lang, `fragment-${fragmentNum}.wav`);
+            try {
+                await fs.access(audioPath);
+                console.log(`✓ Verified ${lang} fragment ${fragmentNum} exists`);
+            } catch {
+                console.error(`❌ Missing audio for ${lang} fragment ${fragmentNum}`);
+                allComplete = false;
+            }
+        }
+
+        if (allComplete) {
+            console.log(`\n🎉 Successfully completed fragment ${fragmentNum} for all languages!`);
+            return true;
+        } else {
+            console.error(`❌ Fragment ${fragmentNum} verification failed, will retry`);
+            return false;
         }
     }
 
@@ -242,49 +275,34 @@ class AudioSyncManager {
         console.log('\n=== Starting Audio Sync Manager ===');
 
         try {
+            let currentFragment = 0;
             while (true) {
-                const nextFragment = await this.findNextFragment();
+                // Always process fragments sequentially
+                console.log(`\n🔍 Checking fragment ${currentFragment}`);
                 
                 // Check if translations exist for this fragment
-                if (await this.hasTranslations(nextFragment)) {
-                    console.log(`\nProcessing fragment ${nextFragment}`);
-                    const success = await this.processFragment(nextFragment);
-                    
-                    if (success) {
-                        // Double check all languages are complete
-                        let allComplete = true;
-                        for (const lang of this.languages) {
-                            const audioPath = path.join(this.audioDir, lang, `fragment-${nextFragment}.wav`);
-                            try {
-                                await fs.access(audioPath);
-                            } catch {
-                                allComplete = false;
-                                break;
-                            }
+                if (await this.hasTranslations(currentFragment)) {
+                    let success = false;
+                    while (!success) {
+                        console.log(`\n🎯 Processing fragment ${currentFragment}`);
+                        success = await this.processFragment(currentFragment);
+                        
+                        if (!success) {
+                            console.log(`⏳ Retrying fragment ${currentFragment} in 2 seconds...`);
+                            await new Promise(resolve => setTimeout(resolve, 2000));
                         }
-
-                        if (allComplete) {
-                            console.log(`✓ Verified fragment ${nextFragment} complete for all languages`);
-                            this.currentFragment = nextFragment + 1;
-                        } else {
-                            console.error(`Fragment ${nextFragment} verification failed, retrying`);
-                            // Wait before retrying
-                            await new Promise(resolve => setTimeout(resolve, 5000));
-                        }
-                    } else {
-                        console.error(`Failed to process fragment ${nextFragment}`);
-                        // Wait before retrying the same fragment
-                        console.log(`Retrying fragment ${nextFragment} in 5 seconds...`);
-                        await new Promise(resolve => setTimeout(resolve, 5000));
                     }
+                    
+                    console.log(`✨ Fragment ${currentFragment} fully completed, moving to next`);
+                    currentFragment++;
                 } else {
-                    // No more translations available, wait for more
-                    console.log(`Waiting for translations for fragment ${nextFragment}...`);
+                    // No translations available for current fragment
+                    console.log(`⏳ Waiting for translations for fragment ${currentFragment}...`);
                     await new Promise(resolve => setTimeout(resolve, 5000));
                 }
             }
         } catch (error) {
-            console.error('Error in sync manager:', error);
+            console.error('❌ Error in sync manager:', error);
         } finally {
             this.isProcessing = false;
         }
