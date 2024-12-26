@@ -131,9 +131,12 @@ function StreamingAudioPlayer({ videoId, language }) {
   const [error, setError] = useState(null);
   const [volume, setVolume] = useState(1.0);
   const [currentTime, setCurrentTime] = useState(0);
+  const [isWaitingForNext, setIsWaitingForNext] = useState(false);
 
   const audioRef = useRef(null);
   const isUnmountingRef = useRef(false);
+  const nextFragmentCheckRef = useRef(null);
+  const currentDurationRef = useRef(null);
 
   const checkBackendAvailability = async () => {
     try {
@@ -158,22 +161,85 @@ function StreamingAudioPlayer({ videoId, language }) {
 
       audioRef.current.addEventListener('timeupdate', () => {
         setCurrentTime(audioRef.current.currentTime);
+        currentDurationRef.current = audioRef.current.duration;
         console.log(`⏱️ Playback progress: ${audioRef.current.currentTime.toFixed(2)}/${audioRef.current.duration.toFixed(2)} seconds`);
       });
 
-      audioRef.current.addEventListener('ended', () => {
+      audioRef.current.addEventListener('ended', async () => {
         console.log(`✅ Fragment ${currentFragment} finished`);
-        if (currentFragment < fragments.length - 1) {
-          setCurrentFragment(prev => prev + 1);
+        
+        // Check if next fragment exists
+        const nextFragment = currentFragment + 1;
+        if (nextFragment < fragments.length) {
+          console.log('📥 Moving to next fragment:', nextFragment);
+          setCurrentFragment(nextFragment);
+          setIsPlaying(true); // Keep playing state
         } else {
-          setIsPlaying(false);
+          console.log('⌛ Waiting for next fragment...');
+          setIsWaitingForNext(true);
+          setIsLoading(true);
+          
+          // Start checking for next fragment
+          if (nextFragmentCheckRef.current) {
+            clearInterval(nextFragmentCheckRef.current);
+          }
+          
+          nextFragmentCheckRef.current = setInterval(async () => {
+            const hasNewFragment = await checkForNewFragments();
+            if (hasNewFragment) {
+              console.log('📥 New fragment available, continuing playback');
+              setIsWaitingForNext(false);
+              setIsLoading(false);
+              setCurrentFragment(nextFragment);
+              setIsPlaying(true); // Keep playing state
+              clearInterval(nextFragmentCheckRef.current);
+            }
+          }, 1000);
         }
       });
 
       audioRef.current.addEventListener('error', (e) => {
         console.error('❌ Audio error:', e);
         setError('Failed to play audio');
+        setIsLoading(false);
       });
+    }
+  };
+
+  const checkForNewFragments = async () => {
+    try {
+      const response = await fetch(`http://localhost:3001/api/audio/${videoId}/${language}/fragments`);
+      const data = await response.json();
+      
+      if (data.files && Array.isArray(data.files)) {
+        const newFragments = data.files
+          .filter(f => f.endsWith('.mp3'))
+          .sort((a, b) => {
+            const numA = parseInt(a.match(/fragment-(\d+)\.mp3/)?.[1] || '0');
+            const numB = parseInt(b.match(/fragment-(\d+)\.mp3/)?.[1] || '0');
+            return numA - numB;
+          });
+
+        if (newFragments.length > fragments.length) {
+          console.log(`📥 Found ${newFragments.length - fragments.length} new fragments`);
+          setFragments(newFragments);
+          
+          // If we're waiting for next fragment and find one, auto-play it
+          if (isWaitingForNext && currentFragment + 1 < newFragments.length) {
+            console.log('📥 New fragment available, auto-playing');
+            setCurrentFragment(currentFragment + 1);
+            setIsWaitingForNext(false);
+            setIsLoading(false);
+            setIsPlaying(true);
+            return true;
+          }
+          return true;
+        }
+      }
+      return false;
+    } catch (error) {
+      console.error('Error checking fragments:', error);
+      return false;
     }
   };
 
@@ -184,8 +250,16 @@ function StreamingAudioPlayer({ videoId, language }) {
     const url = `http://localhost:3001/api/audio/${videoId}/${language}/${fragmentName}`;
     console.log(`🔗 Loading audio from URL: ${url}`);
     
-    audioRef.current.src = url;
-    await audioRef.current.load();
+    // Only reset time values if we're loading a new URL
+    if (audioRef.current?.src !== url) {
+      console.log('Loading new audio file, resetting time values');
+      setCurrentTime(0);
+      currentDurationRef.current = null;
+      audioRef.current.src = url;
+      await audioRef.current.load();
+    } else {
+      console.log('Audio file already loaded, preserving time values');
+    }
   };
 
   const togglePlay = async () => {
@@ -195,23 +269,82 @@ function StreamingAudioPlayer({ videoId, language }) {
         isPlaying, 
         currentFragment, 
         fragmentsCount: fragments.length,
-        currentTime: audioRef.current?.currentTime 
+        isWaitingForNext,
+        currentTime: audioRef.current?.currentTime,
+        duration: currentDurationRef.current
       });
 
       if (!await checkBackendAvailability()) {
         throw new Error('Backend is not available');
       }
 
-      if (isPlaying) {
+      if (isPlaying || isWaitingForNext) {
         console.log('⏸️ Pausing playback');
         await audioRef.current?.pause();
         setIsPlaying(false);
+        setIsWaitingForNext(false);
+        setIsLoading(false);
+        if (nextFragmentCheckRef.current) {
+          clearInterval(nextFragmentCheckRef.current);
+        }
       } else {
         console.log('▶️ Starting playback');
         setupAudioElement();
-        if (!audioRef.current.src) {
+        
+        // Only check for end of fragment if we have a valid duration and current time
+        const hasValidTime = audioRef.current?.currentTime !== undefined && 
+                           currentDurationRef.current && 
+                           !audioRef.current.error;
+                           
+        const wasAtEnd = hasValidTime && (currentTime >= (currentDurationRef.current - 0.1));
+        
+        console.log('Time check:', {
+          hasValidTime,
+          wasAtEnd,
+          currentTime,
+          duration: currentDurationRef.current,
+          error: audioRef.current?.error
+        });
+
+        // Check if we have new fragments available
+        const hasNewFragments = currentFragment + 1 < fragments.length;
+
+        if (wasAtEnd && !hasNewFragments) {
+          console.log('⌛ Was at end of fragment and no new fragments, resuming buffering');
+          setIsWaitingForNext(true);
+          setIsLoading(true);
+          
+          // Start checking for next fragment
+          if (nextFragmentCheckRef.current) {
+            clearInterval(nextFragmentCheckRef.current);
+          }
+          
+          nextFragmentCheckRef.current = setInterval(async () => {
+            const hasNewFragment = await checkForNewFragments();
+            if (hasNewFragment) {
+              console.log('📥 New fragment available, continuing playback');
+              setIsWaitingForNext(false);
+              setIsLoading(false);
+              setCurrentFragment(currentFragment + 1);
+              setIsPlaying(true);
+              clearInterval(nextFragmentCheckRef.current);
+            }
+          }, 1000);
+          return;
+        } else if (wasAtEnd && hasNewFragments) {
+          console.log('📥 Moving to next available fragment');
+          setCurrentFragment(currentFragment + 1);
+          setIsWaitingForNext(false);
+          setIsLoading(false);
+          setIsPlaying(true);
+          return;
+        }
+
+        // Only load audio if we don't have a source or there was an error
+        if (!audioRef.current.src || audioRef.current.error) {
           await loadAudio();
         }
+        
         await audioRef.current.play();
         setIsPlaying(true);
       }
@@ -219,6 +352,7 @@ function StreamingAudioPlayer({ videoId, language }) {
       console.error('❌ Error toggling playback:', error);
       setError('Failed to toggle playback: ' + error.message);
       setIsPlaying(false);
+      setIsLoading(false);
     }
   };
 
@@ -226,34 +360,7 @@ function StreamingAudioPlayer({ videoId, language }) {
   useEffect(() => {
     const checkFragments = async () => {
       if (isUnmountingRef.current) return;
-      
-      try {
-        setIsLoading(true);
-        console.log(`��� Checking fragments for ${language}...`);
-        const response = await fetch(`http://localhost:3001/api/audio/${videoId}/${language}/fragments`);
-        
-        if (!response.ok) {
-          throw new Error(`HTTP error! status: ${response.status}`);
-        }
-
-        const data = await response.json();
-        console.log(`📁 Response for ${language}:`, data);
-        
-        if (data.files && Array.isArray(data.files)) {
-          const newFragments = data.files.filter(f => f.endsWith('.mp3'));
-          console.log(`📥 Found ${newFragments.length} MP3 fragments for ${language}:`, newFragments);
-          
-          if (newFragments.length > fragments.length) {
-            console.log(`📥 Setting ${newFragments.length} fragments for ${language}`);
-            setFragments(newFragments);
-          }
-        }
-      } catch (error) {
-        console.error('❌ Error checking fragments:', error);
-        setError(error.message);
-      } finally {
-        setIsLoading(false);
-      }
+      await checkForNewFragments();
     };
 
     checkFragments();
@@ -263,6 +370,9 @@ function StreamingAudioPlayer({ videoId, language }) {
       console.log('🧹 Cleaning up audio player...');
       isUnmountingRef.current = true;
       clearInterval(interval);
+      if (nextFragmentCheckRef.current) {
+        clearInterval(nextFragmentCheckRef.current);
+      }
       if (audioRef.current) {
         audioRef.current.pause();
         audioRef.current.src = '';
@@ -273,23 +383,56 @@ function StreamingAudioPlayer({ videoId, language }) {
 
   // Effect for handling fragment changes
   useEffect(() => {
-    if (isPlaying) {
-      loadAudio().then(() => {
-        audioRef.current?.play();
-      }).catch(error => {
-        console.error('Failed to load or play audio:', error);
+    const loadAndPlay = async () => {
+      try {
+        if (isPlaying || (!isPlaying && !isWaitingForNext)) {
+          // Only load if this is a new fragment
+          const currentUrl = audioRef.current?.src;
+          const newUrl = `http://localhost:3001/api/audio/${videoId}/${language}/${fragments[currentFragment]}`;
+          
+          if (currentUrl !== newUrl) {
+            await loadAudio();
+            if (isPlaying) {
+              console.log('▶️ Auto-playing next fragment');
+              await audioRef.current?.play().catch(error => {
+                console.error('Failed to auto-play:', error);
+                setIsPlaying(false);
+              });
+            }
+          }
+        }
+      } catch (error) {
+        console.error('Failed to load/play audio:', error);
         setError('Failed to play audio');
         setIsPlaying(false);
-      });
-    }
+      }
+    };
+
+    loadAndPlay();
   }, [currentFragment]);
 
-  // Effect for volume changes
+  // Effect for handling play state changes
   useEffect(() => {
-    if (audioRef.current) {
-      audioRef.current.volume = volume;
-    }
-  }, [volume]);
+    const handlePlayStateChange = async () => {
+      try {
+        if (isPlaying && audioRef.current && !audioRef.current.error) {
+          console.log('▶️ Play state changed to true, starting playback');
+          if (audioRef.current.paused) {
+            await audioRef.current.play().catch(error => {
+              console.error('Failed to play on state change:', error);
+              setIsPlaying(false);
+            });
+          }
+        }
+      } catch (error) {
+        console.error('Failed to handle play state change:', error);
+        setError('Failed to play audio');
+        setIsPlaying(false);
+      }
+    };
+
+    handlePlayStateChange();
+  }, [isPlaying]);
 
   return (
     <div className="flex flex-col items-center space-y-4 p-4">
@@ -307,25 +450,18 @@ function StreamingAudioPlayer({ videoId, language }) {
         <>
           <div className="flex items-center space-x-4">
             <button
-              onClick={async () => {
-                try {
-                  await togglePlay();
-                } catch (error) {
-                  console.error('Error toggling play:', error);
-                  setError(error.message);
-                }
-              }}
-              disabled={isLoading || fragments.length === 0}
+              onClick={togglePlay}
+              disabled={isLoading && !isWaitingForNext}
               className={`p-4 rounded-full ${
-                isLoading || fragments.length === 0
+                (isLoading && !isWaitingForNext) || fragments.length === 0
                   ? 'bg-gray-300 cursor-not-allowed'
-                  : isPlaying
+                  : isPlaying || isWaitingForNext
                   ? 'bg-red-500 hover:bg-red-600'
                   : 'bg-green-500 hover:bg-green-600'
               } text-white transition-colors`}
             >
-              {isLoading ? (
-                <span className="animate-pulse">Loading...</span>
+              {isWaitingForNext ? (
+                '⌛ Buffering...'
               ) : isPlaying ? (
                 '⏸️ Pause'
               ) : (
@@ -335,6 +471,7 @@ function StreamingAudioPlayer({ videoId, language }) {
             
             <div className="text-sm text-gray-600">
               Fragment: {currentFragment + 1}/{fragments.length || 0}
+              {isWaitingForNext && ' (Waiting for next fragment...)'}
             </div>
 
             <div className="flex items-center space-x-2">
@@ -356,30 +493,6 @@ function StreamingAudioPlayer({ videoId, language }) {
               </span>
             </div>
           </div>
-
-          {fragments.length > 0 && (
-            <div className="w-full max-w-md">
-              <div className="text-sm text-gray-600 mb-2">
-                Available Fragments:
-              </div>
-              <div className="bg-gray-50 p-2 rounded max-h-40 overflow-y-auto">
-                {fragments.map((fragment, index) => (
-                  <div
-                    key={fragment}
-                    className={`py-1 px-2 rounded ${
-                      index === currentFragment
-                        ? 'bg-blue-100 text-blue-800'
-                        : index % 2 === 0
-                        ? 'bg-white'
-                        : 'bg-gray-50'
-                    }`}
-                  >
-                    {fragment}
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
         </>
       )}
     </div>
