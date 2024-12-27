@@ -56,6 +56,13 @@ export function AudioFilesStatus({ status }) {
     overallProgress: status.audioStatus.overallProgress
   });
 
+  // Language display names mapping
+  const languageDisplayNames = {
+    Hindi: "Hindi Translation (हिंदी अनुवाद)",
+    Sanskrit: "Sanskrit Translation (संस्कृत अनुवाद)",
+    Marathi: "Marathi Translation (मराठी अनुवाद)"
+  };
+
   return (
     <div className="mt-8">
       <h2 className="text-2xl font-bold mb-4">Audio Files Status</h2>
@@ -72,7 +79,9 @@ export function AudioFilesStatus({ status }) {
 
           return (
             <div key={language} className="bg-white rounded-lg shadow p-4">
-              <h3 className="text-xl font-semibold mb-3">{language}</h3>
+              <h3 className="text-xl font-semibold mb-3 text-blue-600">
+                {languageDisplayNames[language] || language}
+              </h3>
 
               <div className="space-y-4">
                 {console.log(`🎧 Initializing player for ${language}`)}

@@ -159,7 +159,7 @@ async function ensureAudioDirectories(videoId) {
     path.join(baseDir, 'FinalTranslatedAudio'),
     path.join(baseDir, 'FinalTranslatedAudio', 'Hindi'),
     path.join(baseDir, 'FinalTranslatedAudio', 'Sanskrit'),
-    path.join(baseDir, 'FinalTranslatedAudio', 'Kannada')
+    path.join(baseDir, 'FinalTranslatedAudio', 'Marathi')
   ];
 
   for (const dir of dirs) {

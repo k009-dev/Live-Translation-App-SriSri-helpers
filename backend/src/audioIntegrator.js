@@ -17,7 +17,7 @@ async function ensureAudioDirectories(videoId) {
         console.log('✓ Created main audio directory');
 
         // Create directory for each language
-        const languages = ['Hindi', 'Sanskrit', 'Kannada'];
+        const languages = ['Hindi', 'Sanskrit', 'Marathi'];
         for (const lang of languages) {
             const langDir = path.join(audioDir, lang);
             console.log('Creating language directory:', langDir);
@@ -56,7 +56,7 @@ async function getAudioStatus(videoId) {
             .catch(() => []);
 
         // Get status for each language
-        const languages = ['Hindi', 'Sanskrit', 'Kannada'];
+        const languages = ['Hindi', 'Sanskrit', 'Marathi'];
         const languageStatus = {};
         
         for (const lang of languages) {

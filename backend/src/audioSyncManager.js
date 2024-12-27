@@ -18,14 +18,14 @@ class AudioSyncManager {
             // Active languages
             'Hindi',
             'Sanskrit',
-            'Kannada',
+            'Marathi',
             
             // Commented languages
             // 'English',
             // 'Tamil',
             // 'Telugu',
             // 'Malayalam',
-            // 'Marathi',
+            // 'Kannada',
             // 'Gujarati',
             // 'Punjabi',
             // 'French',
